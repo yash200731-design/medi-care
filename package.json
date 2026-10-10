@@ -10,7 +10,8 @@
     "compile": "hardhat compile",
     "test:contract": "hardhat test",
     "test:api": "node scripts/test-access-control.mjs",
-    "test": "npm run test:contract && npm run test:api"
+    "test:auth": "node scripts/test-phase1-auth.mjs",
+    "test": "npm run test:contract && npm run test:api && npm run test:auth"
   },
   "dependencies": {
     "@supabase/ssr": "^0.5.2",

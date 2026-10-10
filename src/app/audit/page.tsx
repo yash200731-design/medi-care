@@ -40,6 +40,12 @@ export default function AuditPage() {
 
   useEffect(() => {
     setMounted(true);
+    const user = DemoStore.getCurrentUser();
+    fetch('/api/auth/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: user.id }),
+    }).catch(() => {});
     setEvents(DemoStore.getAuditEvents());
   }, []);
 

@@ -25,13 +25,28 @@ export default function Navbar() {
 
   useEffect(() => {
     setMounted(true);
-    setCurrentUser(DemoStore.getCurrentUser());
+    const user = DemoStore.getCurrentUser();
+    setCurrentUser(user);
+    // Ensure server session cookie is established for API routes
+    fetch('/api/auth/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: user.id }),
+    }).catch(() => {});
   }, []);
 
-  const handleSwitchUser = (userId: string) => {
+  const handleSwitchUser = async (userId: string) => {
     const updated = DemoStore.setCurrentUser(userId);
     setCurrentUser(updated);
     setIsDropdownOpen(false);
+    // Establish verified server session cookie
+    try {
+      await fetch('/api/auth/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId }),
+      });
+    } catch {}
     // Reload page or trigger storage event to synchronize all views
     window.location.reload();
   };

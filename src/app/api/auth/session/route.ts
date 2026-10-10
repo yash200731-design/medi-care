@@ -1,18 +1,31 @@
 import { NextResponse } from 'next/server';
+import {
+  getAuthenticatedUser,
+  findProfileById,
+  createSignedSessionToken,
+  attachSessionCookie,
+  removeSessionCookie,
+} from '@/lib/auth/server';
 import { DEMO_PATIENTS, DEMO_DOCTORS } from '@/lib/mock-data';
 
 export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const userId = searchParams.get('userId');
-
-  const allUsers = [...DEMO_PATIENTS, ...DEMO_DOCTORS];
-  const user = userId ? allUsers.find((u) => u.id === userId) : allUsers[0];
+  const user = await getAuthenticatedUser(request);
 
   if (!user) {
-    return NextResponse.json({ error: 'User not found' }, { status: 404 });
+    return NextResponse.json(
+      {
+        authenticated: false,
+        error: 'UNAUTHORIZED',
+        message: 'No active authenticated session. Please sign in.',
+      },
+      { status: 401 }
+    );
   }
 
+  const allUsers = [...DEMO_PATIENTS, ...DEMO_DOCTORS];
+
   return NextResponse.json({
+    authenticated: true,
     user,
     availableUsers: allUsers,
   });
@@ -23,19 +36,47 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { userId } = body;
 
-    const allUsers = [...DEMO_PATIENTS, ...DEMO_DOCTORS];
-    const user = allUsers.find((u) => u.id === userId);
-
-    if (!user) {
-      return NextResponse.json({ error: 'Invalid user ID' }, { status: 400 });
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'BAD_REQUEST', message: 'User identifier is required to establish session.' },
+        { status: 400 }
+      );
     }
 
-    return NextResponse.json({
+    const userProfile = findProfileById(userId);
+    if (!userProfile) {
+      return NextResponse.json(
+        { error: 'NOT_FOUND', message: `User identity '${userId}' not found.` },
+        { status: 404 }
+      );
+    }
+
+    // Generate cryptographically signed session token (HMAC-SHA256)
+    const token = createSignedSessionToken(userProfile);
+
+    const response = NextResponse.json({
       success: true,
-      user,
-      message: `Active session switched to ${user.fullName} (${user.role})`,
+      authenticated: true,
+      user: userProfile,
+      token,
+      message: `Session securely established for ${userProfile.fullName} (${userProfile.role}).`,
     });
+
+    // Attach HTTP-only cookie
+    return attachSessionCookie(response, token);
   } catch {
-    return NextResponse.json({ error: 'Invalid payload' }, { status: 400 });
+    return NextResponse.json(
+      { error: 'INTERNAL_ERROR', message: 'Failed to establish authenticated session.' },
+      { status: 500 }
+    );
   }
+}
+
+export async function DELETE() {
+  const response = NextResponse.json({
+    success: true,
+    authenticated: false,
+    message: 'Session cleared.',
+  });
+  return removeSessionCookie(response);
 }
