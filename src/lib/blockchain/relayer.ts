@@ -36,7 +36,7 @@ export class BlockchainRelayer {
         return null;
       }
 
-      const provider = new ethers.JsonRpcProvider(rpcUrl);
+      const provider = new ethers.JsonRpcProvider(rpcUrl, undefined, { staticNetwork: true });
       const signer = new ethers.Wallet(privateKey, provider);
       const contract = new ethers.Contract(contractAddress, MEDIVAULT_AUDIT_ABI, signer);
 

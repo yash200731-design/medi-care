@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireAuth, requireRole, AuthError } from '@/lib/auth/server';
 import { DEMO_DOCTORS } from '@/lib/mock-data';
 import { BlockchainRelayer } from '@/lib/blockchain/relayer';
-import { ConsentService } from '@/lib/dal/consent';
+import { ConsentService, getInMemoryGrants } from '@/lib/dal/consent';
 import { ConsentGrant } from '@/types';
 
 export async function GET(request: Request) {
@@ -12,7 +12,7 @@ export async function GET(request: Request) {
     const filterPatientId = searchParams.get('patientId');
     const filterDoctorId = searchParams.get('doctorId');
 
-    const allGrants = (await import('@/lib/dal/consent')).getInMemoryGrants();
+    const allGrants = getInMemoryGrants();
 
     // 1. Patient role: can ONLY view grants they issued
     if (user.role === 'patient') {
@@ -126,7 +126,7 @@ export async function DELETE(request: Request) {
       return NextResponse.json({ error: 'BAD_REQUEST', message: 'grantId is required.' }, { status: 400 });
     }
 
-    const allGrants = (await import('@/lib/dal/consent')).getInMemoryGrants();
+    const allGrants = getInMemoryGrants();
     const targetGrant = allGrants.find((g) => g.id === grantId);
 
     if (!targetGrant) {
