@@ -11,7 +11,8 @@
     "test:contract": "hardhat test",
     "test:api": "node scripts/test-access-control.mjs",
     "test:auth": "node scripts/test-phase1-auth.mjs",
-    "test": "npm run test:contract && npm run test:api && npm run test:auth"
+    "test:phase2": "node scripts/test-phase2-consent-storage.mjs",
+    "test": "npm run test:contract && npm run test:api && npm run test:auth && npm run test:phase2"
   },
   "dependencies": {
     "@supabase/ssr": "^0.5.2",

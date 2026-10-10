@@ -1,10 +1,8 @@
 import { NextResponse } from 'next/server';
 import { requireAuth, AuthError } from '@/lib/auth/server';
-import { INITIAL_RECORDS, INITIAL_GRANTS } from '@/lib/mock-data';
-import { ConsentGrant } from '@/types';
-
-// In-memory grants cache for API verification
-let activeGrants: ConsentGrant[] = [...INITIAL_GRANTS];
+import { ConsentService } from '@/lib/dal/consent';
+import { StorageService } from '@/lib/storage/service';
+import { INITIAL_RECORDS } from '@/lib/mock-data';
 
 export async function GET(
   request: Request,
@@ -26,108 +24,53 @@ export async function GET(
       );
     }
 
-    // 3. RULE: Patient Identity Verification
-    if (user.role === 'patient') {
-      if (user.id === record.patientId) {
-        return NextResponse.json({
-          authorized: true,
-          reason: 'PATIENT_OWNER',
-          record: {
-            ...record,
-            signedStorageUrl: `https://storage.medivault.local/download/${record.storagePath}?token=auth_${Date.now()}`,
-          },
-          message: 'Access granted: Requesting identity is the verified patient owner.',
-        });
-      } else {
-        // Patient attempting to view another patient's record
-        return NextResponse.json(
-          {
-            authorized: false,
-            error: 'ACCESS_DENIED_UNAUTHORIZED',
-            message: 'Access Denied (403): Patients are strictly prohibited from viewing medical files of other patients.',
-          },
-          { status: 403 }
-        );
-      }
-    }
+    // 3. Delegate to ConsentService: Supabase as source of truth
+    const accessCheck = await ConsentService.verifyFileAccess(user.id, user.role, record);
 
-    // 4. RULE: Doctor Identity & Grant Verification
-    if (user.role === 'doctor') {
-      const doctorGrants = activeGrants.filter(
-        (g) => g.patientId === record.patientId && g.doctorId === user.id
+    if (!accessCheck.allowed) {
+      return NextResponse.json(
+        {
+          authorized: false,
+          error: accessCheck.error,
+          message: accessCheck.message,
+          patientId: record.patientId,
+          doctorId: user.id,
+          expiresAt: accessCheck.grant?.expiresAt,
+          revokedAt: accessCheck.grant?.revokedAt,
+          blockchainTxHash: accessCheck.grant?.blockchainTxHash,
+        },
+        { status: accessCheck.statusCode }
       );
-
-      if (doctorGrants.length === 0) {
-        return NextResponse.json(
-          {
-            authorized: false,
-            error: 'ACCESS_DENIED_NO_GRANT',
-            message: 'Access Denied (403): Doctor has no consent grant for this patient.',
-            patientId: record.patientId,
-            doctorId: user.id,
-          },
-          { status: 403 }
-        );
-      }
-
-      // Check most recent grant
-      const grant = doctorGrants[0];
-
-      // Check Revocation
-      if (grant.isRevoked) {
-        return NextResponse.json(
-          {
-            authorized: false,
-            error: 'ACCESS_DENIED_REVOKED',
-            message: 'Access Denied (403): Patient has explicitly REVOKED consent for your credentials.',
-            revokedAt: grant.revokedAt,
-            blockchainTxHash: grant.blockchainTxHash,
-          },
-          { status: 403 }
-        );
-      }
-
-      // Check Expiration
-      const now = Date.now();
-      const expiryTime = new Date(grant.expiresAt).getTime();
-
-      if (now >= expiryTime) {
-        return NextResponse.json(
-          {
-            authorized: false,
-            error: 'ACCESS_DENIED_EXPIRED',
-            message: `Access Denied (403): Consent grant EXPIRED at ${new Date(grant.expiresAt).toLocaleString()}. Access permanently closed.`,
-            expiresAt: grant.expiresAt,
-            blockchainTxHash: grant.blockchainTxHash,
-          },
-          { status: 403 }
-        );
-      }
-
-      // Verified active consent grant
-      const remainingMinutes = Math.round((expiryTime - now) / 60000);
-
-      return NextResponse.json({
-        authorized: true,
-        reason: 'ACTIVE_GRANT',
-        grant: {
-          id: grant.id,
-          expiresAt: grant.expiresAt,
-          remainingMinutes,
-          blockchainTxHash: grant.blockchainTxHash,
-        },
-        record: {
-          ...record,
-          signedStorageUrl: `https://storage.medivault.local/download/${record.storagePath}?token=grant_${grant.id}_${Date.now()}`,
-        },
-        message: `Access granted: Active consent verified. Window closes in ${remainingMinutes} minutes.`,
-      });
     }
 
-    return NextResponse.json(
-      { error: 'FORBIDDEN', message: 'Unauthorized role for medical record access.' },
-      { status: 403 }
+    // 4. Generate genuine short-lived signed storage URL (valid for 60 seconds)
+    const signedStorageUrl = await StorageService.createSignedUrl(
+      record.storagePath,
+      record.patientId,
+      60 // 60 seconds short-lived
     );
+
+    const remainingMinutes = accessCheck.grant?.expiresAt
+      ? Math.max(0, Math.round((new Date(accessCheck.grant.expiresAt).getTime() - Date.now()) / 60000))
+      : undefined;
+
+    return NextResponse.json({
+      authorized: true,
+      reason: accessCheck.reason,
+      grant: accessCheck.grant
+        ? {
+            id: accessCheck.grant.id,
+            expiresAt: accessCheck.grant.expiresAt,
+            remainingMinutes,
+            blockchainTxHash: accessCheck.grant.blockchainTxHash,
+          }
+        : undefined,
+      record: {
+        ...record,
+        signedStorageUrl,
+      },
+      message: accessCheck.message,
+    });
   } catch (err: unknown) {
     if (err instanceof AuthError) {
       return NextResponse.json({ error: err.code, message: err.message }, { status: err.statusCode });

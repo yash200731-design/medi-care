@@ -1,18 +1,9 @@
 import { NextResponse } from 'next/server';
 import { requireAuth, requireRole, AuthError } from '@/lib/auth/server';
-import { INITIAL_GRANTS, DEMO_DOCTORS } from '@/lib/mock-data';
+import { DEMO_DOCTORS } from '@/lib/mock-data';
 import { BlockchainRelayer } from '@/lib/blockchain/relayer';
+import { ConsentService } from '@/lib/dal/consent';
 import { ConsentGrant } from '@/types';
-
-let apiGrants: ConsentGrant[] = [...INITIAL_GRANTS];
-
-function getApiGrants(): ConsentGrant[] {
-  return apiGrants;
-}
-
-function setApiGrants(grants: ConsentGrant[]) {
-  apiGrants = grants;
-}
 
 export async function GET(request: Request) {
   try {
@@ -20,6 +11,8 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const filterPatientId = searchParams.get('patientId');
     const filterDoctorId = searchParams.get('doctorId');
+
+    const allGrants = (await import('@/lib/dal/consent')).getInMemoryGrants();
 
     // 1. Patient role: can ONLY view grants they issued
     if (user.role === 'patient') {
@@ -29,7 +22,7 @@ export async function GET(request: Request) {
           { status: 403 }
         );
       }
-      const results = apiGrants.filter((g) => g.patientId === user.id);
+      const results = allGrants.filter((g) => g.patientId === user.id);
       return NextResponse.json({ grants: results });
     }
 
@@ -41,7 +34,7 @@ export async function GET(request: Request) {
           { status: 403 }
         );
       }
-      const results = apiGrants.filter((g) => g.doctorId === user.id);
+      const results = allGrants.filter((g) => g.doctorId === user.id);
       return NextResponse.json({ grants: results });
     }
 
@@ -81,9 +74,7 @@ export async function POST(request: Request) {
     }
 
     const grantId = `grant-${Date.now()}`;
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + Number(durationHours) * 3600 * 1000);
-    const expiresAtUnix = Math.floor(expiresAt.getTime() / 1000);
+    const expiresAtUnix = Math.floor(Date.now() / 1000) + Number(durationHours) * 3600;
 
     // Call blockchain relayer
     const onChainResult = await BlockchainRelayer.recordConsentGrant(
@@ -95,7 +86,8 @@ export async function POST(request: Request) {
 
     const doctor = DEMO_DOCTORS.find((d) => d.id === doctorId);
 
-    const newGrant: ConsentGrant = {
+    // Persist via ConsentService (Supabase source of truth)
+    const newGrant = await ConsentService.createGrant({
       id: grantId,
       requestId,
       patientId: user.id,
@@ -103,14 +95,9 @@ export async function POST(request: Request) {
       doctorId,
       doctorName: doctor?.fullName || 'Physician',
       doctorSpecialty: doctor?.specialty,
-      grantedAt: now.toISOString(),
-      expiresAt: expiresAt.toISOString(),
-      isRevoked: false,
+      durationHours,
       blockchainTxHash: onChainResult.transactionHash,
-      createdAt: now.toISOString(),
-    };
-
-    apiGrants = [newGrant, ...apiGrants];
+    });
 
     return NextResponse.json({
       success: true,
@@ -139,7 +126,9 @@ export async function DELETE(request: Request) {
       return NextResponse.json({ error: 'BAD_REQUEST', message: 'grantId is required.' }, { status: 400 });
     }
 
-    const targetGrant = apiGrants.find((g) => g.id === grantId);
+    const allGrants = (await import('@/lib/dal/consent')).getInMemoryGrants();
+    const targetGrant = allGrants.find((g) => g.id === grantId);
+
     if (!targetGrant) {
       return NextResponse.json({ error: 'NOT_FOUND', message: 'Consent grant not found.' }, { status: 404 });
     }
@@ -162,13 +151,15 @@ export async function DELETE(request: Request) {
       targetGrant.doctorId
     );
 
-    targetGrant.isRevoked = true;
-    targetGrant.revokedAt = new Date().toISOString();
-    targetGrant.blockchainTxHash = onChainResult.transactionHash;
+    // Revoke in Supabase via ConsentService
+    const revokedGrant = await ConsentService.revokeGrant(grantId, user.id);
+    if (revokedGrant) {
+      revokedGrant.blockchainTxHash = onChainResult.transactionHash;
+    }
 
     return NextResponse.json({
       success: true,
-      grant: targetGrant,
+      grant: revokedGrant,
       blockchain: onChainResult,
       message: 'Consent grant IMMEDIATELY revoked on ledger. All subsequent doctor requests will be denied with HTTP 403.',
     });
