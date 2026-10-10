@@ -82,6 +82,8 @@ export type AuditAction =
   | 'ACCESS_DENIED_REVOKED'
   | 'ACCESS_DENIED_UNAUTHORIZED';
 
+export type BlockchainTxStatus = 'pending' | 'confirmed' | 'failed' | 'simulated';
+
 export interface AuditEvent {
   id: string;
   actorId: string;
@@ -98,6 +100,8 @@ export interface AuditEvent {
   blockchainTxHash?: string;
   blockNumber?: number;
   confirmedOnChain: boolean;
+  blockchainStatus?: BlockchainTxStatus;
+  isSimulated?: boolean;
   createdAt: string;
 }
 

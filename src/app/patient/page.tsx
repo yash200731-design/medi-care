@@ -67,6 +67,11 @@ export default function PatientDashboard() {
   useEffect(() => {
     setMounted(true);
     refreshData();
+    fetch('/api/auth/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: currentPatient.id }),
+    }).catch(() => {});
   }, [currentPatient.id]);
 
   // Compute live hash as user types content

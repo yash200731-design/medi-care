@@ -35,15 +35,8 @@ export async function computeSha256(textOrBuffer: string | ArrayBuffer): Promise
   return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-// Generate realistic mock transaction hash
-export function generateMockTxHash(): string {
-  const chars = '0123456789abcdef';
-  let hash = '0x';
-  for (let i = 0; i < 64; i++) {
-    hash += chars[Math.floor(Math.random() * chars.length)];
-  }
-  return hash;
-}
+import { generateMockTxHash } from '@/lib/blockchain/utils';
+export { generateMockTxHash };
 
 export class DemoStore {
   private static isBrowser(): boolean {
@@ -128,7 +121,9 @@ export class DemoStore {
         sha256: newRecord.documentSha256,
       },
       blockchainTxHash: txHash,
-      confirmedOnChain: true,
+      confirmedOnChain: false,
+      blockchainStatus: 'simulated',
+      isSimulated: true,
     });
 
     return newRecord;
@@ -270,7 +265,9 @@ export class DemoStore {
         expiresAt: expiresAt,
       },
       blockchainTxHash: txHash,
-      confirmedOnChain: true,
+      confirmedOnChain: false,
+      blockchainStatus: 'simulated',
+      isSimulated: true,
     });
 
     return newGrant;
@@ -312,7 +309,9 @@ export class DemoStore {
         reason: 'Immediate patient revocation applied',
       },
       blockchainTxHash: txHash,
-      confirmedOnChain: true,
+      confirmedOnChain: false,
+      blockchainStatus: 'simulated',
+      isSimulated: true,
     });
 
     return revokedGrant;
@@ -390,10 +389,18 @@ export class DemoStore {
   }
 
   static logAuditEvent(event: Omit<AuditEvent, 'id' | 'createdAt'>): AuditEvent {
+    const isSimulated = event.isSimulated ?? (event.blockchainStatus === 'simulated' || (!event.confirmedOnChain && !!event.blockchainTxHash));
+    const blockchainStatus = event.blockchainStatus ?? (
+      event.confirmedOnChain ? 'confirmed' : (event.blockchainTxHash ? 'simulated' : undefined)
+    );
+
     const fullEvent: AuditEvent = {
       ...event,
       id: `aud-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      blockNumber: event.confirmedOnChain ? Math.floor(19845000 + Math.random() * 5000) : undefined,
+      blockNumber: blockchainStatus === 'confirmed' ? Math.floor(19845000 + Math.random() * 5000) : undefined,
+      confirmedOnChain: blockchainStatus === 'confirmed',
+      blockchainStatus,
+      isSimulated,
       createdAt: new Date().toISOString(),
     };
 

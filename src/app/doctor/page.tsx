@@ -48,15 +48,32 @@ export default function DoctorPortal() {
     const user = DemoStore.getCurrentUser();
     if (user.role === 'doctor') {
       setActiveDoctor(user);
+      fetch('/api/auth/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: user.id }),
+      }).catch(() => {});
     } else {
       setActiveDoctor(DEMO_DOCTORS[0]);
+      fetch('/api/auth/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: DEMO_DOCTORS[0].id }),
+      }).catch(() => {});
     }
   }, []);
 
-  const handleSwitchDoctor = (docId: string) => {
+  const handleSwitchDoctor = async (docId: string) => {
     const updated = DemoStore.setCurrentUser(docId);
     setActiveDoctor(updated);
     setAccessResult(null);
+    try {
+      await fetch('/api/auth/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: docId }),
+      });
+    } catch {}
   };
 
   const selectedPatient =
@@ -73,60 +90,93 @@ export default function DoctorPortal() {
   const latestGrant = grantsForDoctor.length > 0 ? grantsForDoctor[0] : null;
 
   // Handler for protected record access with strict zero-trust evaluation
-  const handleAccessRecord = (record: MedicalRecord) => {
+  const handleAccessRecord = async (record: MedicalRecord) => {
     setEvaluatingRecordId(record.id);
 
-    // Call server-side authorization engine
-    const result = DemoStore.verifyAccess(activeDoctor.id, record.patientId);
-
-    // Log corresponding audit event
-    if (result.allowed) {
-      DemoStore.logAuditEvent({
-        actorId: activeDoctor.id,
-        actorName: activeDoctor.fullName,
-        actorRole: 'doctor',
-        action: 'ACCESS_RECORD',
-        targetPatientId: record.patientId,
-        targetPatientName: record.patientName,
-        targetRecordId: record.id,
-        targetRecordTitle: record.title,
-        details: {
-          grantId: result.grant?.id,
-          reason: 'Authorized clinical review',
-        },
-        confirmedOnChain: true,
+    try {
+      // Query the real server-side authorization gateway
+      const res = await fetch(`/api/records/${record.id}/access`, {
+        credentials: 'include',
       });
-    } else {
-      const actionType =
-        result.reason === 'EXPIRED_GRANT'
-          ? 'ACCESS_DENIED_EXPIRED'
-          : result.reason === 'REVOKED_GRANT'
-          ? 'ACCESS_DENIED_REVOKED'
-          : 'ACCESS_DENIED_UNAUTHORIZED';
+      const data = await res.json();
 
-      DemoStore.logAuditEvent({
-        actorId: activeDoctor.id,
-        actorName: activeDoctor.fullName,
-        actorRole: 'doctor',
-        action: actionType,
-        targetPatientId: record.patientId,
-        targetPatientName: record.patientName,
-        targetRecordId: record.id,
-        targetRecordTitle: record.title,
-        details: {
-          violation: result.message,
-          grantId: result.grant?.id,
-        },
-        confirmedOnChain: true,
+      if (res.ok && data.authorized) {
+        DemoStore.logAuditEvent({
+          actorId: activeDoctor.id,
+          actorName: activeDoctor.fullName,
+          actorRole: 'doctor',
+          action: 'ACCESS_RECORD',
+          targetPatientId: record.patientId,
+          targetPatientName: record.patientName,
+          targetRecordId: record.id,
+          targetRecordTitle: record.title,
+          details: {
+            grantId: data.grant?.id,
+            reason: 'Authorized clinical review',
+          },
+          confirmedOnChain: true,
+        });
+
+        setAccessResult({
+          recordId: record.id,
+          result: {
+            allowed: true,
+            reason: data.reason || 'ACTIVE_GRANT',
+            grant: data.grant,
+            message: data.message,
+          },
+          record: data.record || record,
+        });
+      } else {
+        const actionType =
+          data.error === 'ACCESS_DENIED_EXPIRED'
+            ? 'ACCESS_DENIED_EXPIRED'
+            : data.error === 'ACCESS_DENIED_REVOKED'
+            ? 'ACCESS_DENIED_REVOKED'
+            : 'ACCESS_DENIED_UNAUTHORIZED';
+
+        DemoStore.logAuditEvent({
+          actorId: activeDoctor.id,
+          actorName: activeDoctor.fullName,
+          actorRole: 'doctor',
+          action: actionType,
+          targetPatientId: record.patientId,
+          targetPatientName: record.patientName,
+          targetRecordId: record.id,
+          targetRecordTitle: record.title,
+          details: {
+            violation: data.message || 'Access Denied (403)',
+            grantId: data.grant?.id,
+          },
+          confirmedOnChain: true,
+        });
+
+        setAccessResult({
+          recordId: record.id,
+          result: {
+            allowed: false,
+            reason:
+              data.error === 'ACCESS_DENIED_REVOKED'
+                ? 'REVOKED_GRANT'
+                : data.error === 'ACCESS_DENIED_EXPIRED'
+                ? 'EXPIRED_GRANT'
+                : 'NO_GRANT',
+            message: data.message || 'Access denied by server-side zero-trust authorization.',
+          },
+          record: undefined,
+        });
+      }
+    } catch {
+      // Fallback to local verifier if server unreachable
+      const result = DemoStore.verifyAccess(activeDoctor.id, record.patientId);
+      setAccessResult({
+        recordId: record.id,
+        result,
+        record: result.allowed ? record : undefined,
       });
+    } finally {
+      setEvaluatingRecordId(null);
     }
-
-    setAccessResult({
-      recordId: record.id,
-      result,
-      record: result.allowed ? record : undefined,
-    });
-    setEvaluatingRecordId(null);
   };
 
   const handleCreateRequest = (e: React.FormEvent) => {

@@ -1,125 +1,80 @@
 import { NextResponse } from 'next/server';
-import { INITIAL_RECORDS, INITIAL_GRANTS } from '@/lib/mock-data';
-import { ConsentGrant } from '@/types';
-
-// In-memory grants cache for API verification
-let activeGrants: ConsentGrant[] = [...INITIAL_GRANTS];
-
-function setApiGrants(grants: ConsentGrant[]) {
-  activeGrants = grants;
-}
-
-function getApiGrants(): ConsentGrant[] {
-  return activeGrants;
-}
+import { requireAuth, AuthError } from '@/lib/auth/server';
+import { ConsentService } from '@/lib/dal/consent';
+import { StorageService } from '@/lib/storage/service';
+import { INITIAL_RECORDS } from '@/lib/mock-data';
 
 export async function GET(
   request: Request,
   { params }: { params: { id: string } }
 ) {
-  const { id: recordId } = params;
-  const { searchParams } = new URL(request.url);
+  try {
+    // 1. Enforce server-only authenticated session
+    // NEVER trust x-viewer-id, patientId, or doctorId supplied by the client
+    const user = await requireAuth(request);
 
-  // Viewer identity passed via header or query parameter
-  const viewerId = request.headers.get('x-viewer-id') || searchParams.get('viewerId');
+    const { id: recordId } = params;
 
-  if (!viewerId) {
-    return NextResponse.json(
-      {
-        error: 'UNAUTHORIZED',
-        message: 'Missing authenticated viewer identity (x-viewer-id header or viewerId parameter).',
-      },
-      { status: 401 }
+    // 2. Find target medical record
+    const record = INITIAL_RECORDS.find((r) => r.id === recordId);
+    if (!record) {
+      return NextResponse.json(
+        { error: 'NOT_FOUND', message: 'Medical record not found.' },
+        { status: 404 }
+      );
+    }
+
+    // 3. Delegate to ConsentService: Supabase as source of truth
+    const accessCheck = await ConsentService.verifyFileAccess(user.id, user.role, record);
+
+    if (!accessCheck.allowed) {
+      return NextResponse.json(
+        {
+          authorized: false,
+          error: accessCheck.error,
+          message: accessCheck.message,
+          patientId: record.patientId,
+          doctorId: user.id,
+          expiresAt: accessCheck.grant?.expiresAt,
+          revokedAt: accessCheck.grant?.revokedAt,
+          blockchainTxHash: accessCheck.grant?.blockchainTxHash,
+        },
+        { status: accessCheck.statusCode }
+      );
+    }
+
+    // 4. Generate genuine short-lived signed storage URL (valid for 60 seconds)
+    const signedStorageUrl = await StorageService.createSignedUrl(
+      record.storagePath,
+      record.patientId,
+      60 // 60 seconds short-lived
     );
-  }
 
-  // Find target medical record
-  const record = INITIAL_RECORDS.find((r) => r.id === recordId);
-  if (!record) {
-    return NextResponse.json({ error: 'NOT_FOUND', message: 'Medical record not found.' }, { status: 404 });
-  }
+    const remainingMinutes = accessCheck.grant?.expiresAt
+      ? Math.max(0, Math.round((new Date(accessCheck.grant.expiresAt).getTime() - Date.now()) / 60000))
+      : undefined;
 
-  // RULE 1: Patient viewing own record is always authorized
-  if (viewerId === record.patientId) {
     return NextResponse.json({
       authorized: true,
-      reason: 'PATIENT_OWNER',
+      reason: accessCheck.reason,
+      grant: accessCheck.grant
+        ? {
+            id: accessCheck.grant.id,
+            expiresAt: accessCheck.grant.expiresAt,
+            remainingMinutes,
+            blockchainTxHash: accessCheck.grant.blockchainTxHash,
+          }
+        : undefined,
       record: {
         ...record,
-        signedStorageUrl: `https://storage.medivault.local/download/${record.storagePath}?token=auth_${Date.now()}`,
+        signedStorageUrl,
       },
-      message: 'Access granted: Requesting identity is the verified patient owner.',
+      message: accessCheck.message,
     });
+  } catch (err: unknown) {
+    if (err instanceof AuthError) {
+      return NextResponse.json({ error: err.code, message: err.message }, { status: err.statusCode });
+    }
+    return NextResponse.json({ error: 'INTERNAL_ERROR', message: 'Internal authorization error.' }, { status: 500 });
   }
-
-  // RULE 2: Doctor accessing patient record MUST satisfy active unrevoked unexpired grant
-  const doctorGrants = activeGrants.filter(
-    (g) => g.patientId === record.patientId && g.doctorId === viewerId
-  );
-
-  if (doctorGrants.length === 0) {
-    return NextResponse.json(
-      {
-        authorized: false,
-        error: 'ACCESS_DENIED_NO_GRANT',
-        message: 'Access Denied (403): Doctor has no consent grant for this patient.',
-        patientId: record.patientId,
-        doctorId: viewerId,
-      },
-      { status: 403 }
-    );
-  }
-
-  // Retrieve the relevant grant (check the most recent or active one)
-  const grant = doctorGrants[0];
-
-  // RULE 3: Revocation Check
-  if (grant.isRevoked) {
-    return NextResponse.json(
-      {
-        authorized: false,
-        error: 'ACCESS_DENIED_REVOKED',
-        message: 'Access Denied (403): Patient has explicitly REVOKED consent for your credentials.',
-        revokedAt: grant.revokedAt,
-        blockchainTxHash: grant.blockchainTxHash,
-      },
-      { status: 403 }
-    );
-  }
-
-  // RULE 4: Expiration Check
-  const now = new Date().getTime();
-  const expiryTime = new Date(grant.expiresAt).getTime();
-
-  if (now >= expiryTime) {
-    return NextResponse.json(
-      {
-        authorized: false,
-        error: 'ACCESS_DENIED_EXPIRED',
-        message: `Access Denied (403): Consent grant EXPIRED at ${new Date(grant.expiresAt).toLocaleString()}. Access permanently closed.`,
-        expiresAt: grant.expiresAt,
-        blockchainTxHash: grant.blockchainTxHash,
-      },
-      { status: 403 }
-    );
-  }
-
-  // SUCCESS: Active, non-expired, non-revoked grant verified!
-  const remainingMinutes = Math.round((expiryTime - now) / 60000);
-
-  return NextResponse.json({
-    authorized: true,
-    reason: 'ACTIVE_GRANT',
-    grant: {
-      id: grant.id,
-      expiresAt: grant.expiresAt,
-      remainingMinutes,
-      blockchainTxHash: grant.blockchainTxHash,
-    },
-    record: {
-      ...record,
-      signedStorageUrl: `https://storage.medivault.local/download/${record.storagePath}?token=grant_${grant.id}_${Date.now()}`,
-    },
-    message: `Access granted: Active consent verified. Window closes in ${remainingMinutes} minutes.`,
-  });
 }

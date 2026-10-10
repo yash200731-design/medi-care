@@ -40,6 +40,12 @@ export default function AuditPage() {
 
   useEffect(() => {
     setMounted(true);
+    const user = DemoStore.getCurrentUser();
+    fetch('/api/auth/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: user.id }),
+    }).catch(() => {});
     setEvents(DemoStore.getAuditEvents());
   }, []);
 
@@ -299,20 +305,28 @@ export default function AuditPage() {
 
                       <td className="py-4 px-4">
                         {event.blockchainTxHash ? (
-                          <div className="flex items-center space-x-1.5 font-mono text-[10px] text-slate-600">
-                            <span className="truncate max-w-[120px]">
-                              {event.blockchainTxHash}
-                            </span>
-                            <button
-                              onClick={() => handleCopy(event.blockchainTxHash!)}
-                              className="text-slate-400 hover:text-slate-600"
-                            >
-                              {copiedHash === event.blockchainTxHash ? (
-                                <Check className="h-3 w-3 text-emerald-600" />
-                              ) : (
-                                <Copy className="h-3 w-3" />
-                              )}
-                            </button>
+                          <div className="space-y-1">
+                            <div className="flex items-center space-x-1.5 font-mono text-[10px] text-slate-600">
+                              <span className="truncate max-w-[120px]">
+                                {event.blockchainTxHash}
+                              </span>
+                              <button
+                                onClick={() => handleCopy(event.blockchainTxHash!)}
+                                className="text-slate-400 hover:text-slate-600"
+                                title="Copy hash"
+                              >
+                                {copiedHash === event.blockchainTxHash ? (
+                                  <Check className="h-3 w-3 text-emerald-600" />
+                                ) : (
+                                  <Copy className="h-3 w-3" />
+                                )}
+                              </button>
+                            </div>
+                            {(event.isSimulated || event.blockchainStatus === 'simulated') && (
+                              <div className="text-[9px] font-mono text-purple-600 font-bold tracking-tight">
+                                [SIMULATED MOCK HASH]
+                              </div>
+                            )}
                           </div>
                         ) : (
                           <span className="text-slate-400 text-[11px]">-</span>
@@ -324,14 +338,58 @@ export default function AuditPage() {
                       </td>
 
                       <td className="py-4 px-4 text-right">
-                        {event.confirmedOnChain ? (
-                          <span className="inline-flex items-center space-x-1 text-emerald-700 font-bold text-[11px]">
-                            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
-                            <span>Confirmed</span>
-                          </span>
-                        ) : (
-                          <span className="text-slate-400 text-[11px]">Logged</span>
-                        )}
+                        {(() => {
+                          const status =
+                            event.blockchainStatus ||
+                            (event.isSimulated
+                              ? 'simulated'
+                              : event.confirmedOnChain
+                              ? 'confirmed'
+                              : event.blockchainTxHash
+                              ? 'simulated'
+                              : undefined);
+
+                          if (status === 'confirmed') {
+                            return (
+                              <span className="inline-flex items-center space-x-1 text-emerald-700 font-bold text-[10px] bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-200">
+                                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                                <span>Confirmed</span>
+                              </span>
+                            );
+                          }
+                          if (status === 'simulated') {
+                            return (
+                              <span
+                                className="inline-flex items-center space-x-1 text-purple-700 font-bold text-[10px] bg-purple-50 px-2.5 py-1 rounded-full border border-purple-200"
+                                title="Simulation mode enabled: No genuine on-chain receipt validated."
+                              >
+                                <Sparkles className="h-3.5 w-3.5 text-purple-600" />
+                                <span>[SIMULATED]</span>
+                              </span>
+                            );
+                          }
+                          if (status === 'pending') {
+                            return (
+                              <span className="inline-flex items-center space-x-1 text-amber-700 font-bold text-[10px] bg-amber-50 px-2.5 py-1 rounded-full border border-amber-200">
+                                <Clock className="h-3.5 w-3.5 text-amber-600 animate-spin" />
+                                <span>Pending</span>
+                              </span>
+                            );
+                          }
+                          if (status === 'failed') {
+                            return (
+                              <span className="inline-flex items-center space-x-1 text-rose-700 font-bold text-[10px] bg-rose-50 px-2.5 py-1 rounded-full border border-rose-200">
+                                <XCircle className="h-3.5 w-3.5 text-rose-600" />
+                                <span>Failed</span>
+                              </span>
+                            );
+                          }
+                          return (
+                            <span className="inline-flex items-center space-x-1 text-slate-500 font-medium text-[10px] bg-slate-100 px-2.5 py-1 rounded-full border border-slate-200">
+                              <span>Off-Chain Log</span>
+                            </span>
+                          );
+                        })()}
                       </td>
                     </tr>
                   );
