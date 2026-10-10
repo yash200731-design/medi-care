@@ -148,7 +148,7 @@ export async function POST(request: Request) {
       fileSize: fileSize || Buffer.byteLength(content, 'utf8'),
       mimeType: 'application/pdf',
       documentSha256,
-      blockchainTxHash: onChainResult.transactionHash,
+      blockchainTxHash: onChainResult.transactionHash || undefined,
       createdAt: new Date().toISOString(),
       contentPreview: content,
     };

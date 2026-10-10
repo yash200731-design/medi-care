@@ -12,7 +12,8 @@
     "test:api": "node scripts/test-access-control.mjs",
     "test:auth": "node scripts/test-phase1-auth.mjs",
     "test:phase2": "node scripts/test-phase2-consent-storage.mjs",
-    "test": "npm run test:contract && npm run test:api && npm run test:auth && npm run test:phase2"
+    "test:phase3": "node scripts/test-phase3-blockchain-db.mjs",
+    "test": "npm run test:contract && npm run test:api && npm run test:auth && npm run test:phase2 && npm run test:phase3"
   },
   "dependencies": {
     "@supabase/ssr": "^0.5.2",

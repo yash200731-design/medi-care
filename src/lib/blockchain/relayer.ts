@@ -1,5 +1,6 @@
 import { ethers } from 'ethers';
-import { generateMockTxHash } from '@/lib/store/demo-store';
+import { generateMockTxHash, toBytes32Hash } from './utils';
+import { BlockchainTxStatus } from '@/types';
 
 // ABI for the MediVaultAudit contract functions we call
 export const MEDIVAULT_AUDIT_ABI = [
@@ -15,25 +16,13 @@ export const MEDIVAULT_AUDIT_ABI = [
 ];
 
 export interface RelayedTxResult {
-  success: boolean;
-  transactionHash: string;
-  blockNumber: number;
+  status: BlockchainTxStatus;
+  transactionHash: string | null;
+  blockNumber: number | null;
   confirmed: boolean;
-  simulated: boolean;
+  isSimulated: boolean;
+  label: string;
   error?: string;
-}
-
-// Convert string ID to bytes32 keccak256 hash
-export function toBytes32Hash(input: string): string {
-  // If it's already a 64-char hex string with 0x prefix
-  if (input.startsWith('0x') && input.length === 66) {
-    return input;
-  }
-  // If it's a 64-char hex string without 0x (like a SHA-256)
-  if (!input.startsWith('0x') && input.length === 64) {
-    return '0x' + input;
-  }
-  return ethers.keccak256(ethers.toUtf8Bytes(input));
 }
 
 export class BlockchainRelayer {
@@ -57,9 +46,18 @@ export class BlockchainRelayer {
     }
   }
 
+  private static isSimulationEnabled(): boolean {
+    return (
+      process.env.ENABLE_BLOCKCHAIN_SIMULATION === 'true' ||
+      process.env.NEXT_PUBLIC_DEMO_MODE === 'true' ||
+      !process.env.BLOCKCHAIN_RPC_URL
+    );
+  }
+
   /**
    * Records a consent grant on the blockchain.
-   * STRICT REQUIREMENT: Never claims a transaction succeeded unless confirmed with receipt.status === 1.
+   * STRICT REQUIREMENT: Only confirmed if validated with real on-chain receipt (receipt.status === 1).
+   * Never sets confirmed: true for simulations or unconfirmed transactions.
    */
   static async recordConsentGrant(
     grantId: string,
@@ -82,39 +80,65 @@ export class BlockchainRelayer {
           expiresAtUnix
         );
 
-        // Wait for 1 block confirmation
+        // Wait for genuine on-chain block receipt
         const receipt = await tx.wait(1);
 
         if (receipt && receipt.status === 1) {
           return {
-            success: true,
+            status: 'confirmed',
             transactionHash: receipt.hash,
             blockNumber: receipt.blockNumber,
             confirmed: true,
-            simulated: false,
+            isSimulated: false,
+            label: 'Confirmed on Ethereum ledger',
           };
         } else {
           return {
-            success: false,
+            status: 'failed',
             transactionHash: tx.hash,
-            blockNumber: 0,
+            blockNumber: null,
             confirmed: false,
-            simulated: false,
-            error: 'Transaction reverted on-chain.',
+            isSimulated: false,
+            label: 'Transaction reverted on-chain',
+            error: 'Execution reverted by EVM.',
           };
         }
       } catch (err: unknown) {
-        console.warn('Live blockchain call failed, falling back to verified simulation:', err);
+        const errMsg = err instanceof Error ? err.message : 'Blockchain transaction error';
+        if (!this.isSimulationEnabled()) {
+          return {
+            status: 'failed',
+            transactionHash: null,
+            blockNumber: null,
+            confirmed: false,
+            isSimulated: false,
+            label: 'Transaction submission failed',
+            error: errMsg,
+          };
+        }
       }
     }
 
-    // Deterministic simulation for local demo mode
+    // Explicitly labeled simulation mode - NEVER claims confirmed: true!
+    if (this.isSimulationEnabled()) {
+      return {
+        status: 'simulated',
+        transactionHash: generateMockTxHash(),
+        blockNumber: null,
+        confirmed: false, // Strict: Simulation is NEVER marked confirmed!
+        isSimulated: true,
+        label: '[SIMULATED - NO ON-CHAIN RECEIPT]',
+      };
+    }
+
     return {
-      success: true,
-      transactionHash: generateMockTxHash(),
-      blockNumber: Math.floor(19846000 + Math.random() * 2000),
-      confirmed: true,
-      simulated: true,
+      status: 'failed',
+      transactionHash: null,
+      blockNumber: null,
+      confirmed: false,
+      isSimulated: false,
+      label: 'Blockchain relayer unavailable',
+      error: 'No active Ethereum RPC connection and simulation is disabled.',
     };
   }
 
@@ -139,24 +163,59 @@ export class BlockchainRelayer {
 
         if (receipt && receipt.status === 1) {
           return {
-            success: true,
+            status: 'confirmed',
             transactionHash: receipt.hash,
             blockNumber: receipt.blockNumber,
             confirmed: true,
-            simulated: false,
+            isSimulated: false,
+            label: 'Confirmed on Ethereum ledger',
+          };
+        } else {
+          return {
+            status: 'failed',
+            transactionHash: tx.hash,
+            blockNumber: null,
+            confirmed: false,
+            isSimulated: false,
+            label: 'Revocation transaction reverted on-chain',
+            error: 'Revocation reverted.',
           };
         }
       } catch (err: unknown) {
-        console.warn('Live blockchain revocation call failed, falling back to simulated:', err);
+        const errMsg = err instanceof Error ? err.message : 'Blockchain error';
+        if (!this.isSimulationEnabled()) {
+          return {
+            status: 'failed',
+            transactionHash: null,
+            blockNumber: null,
+            confirmed: false,
+            isSimulated: false,
+            label: 'Revocation failed',
+            error: errMsg,
+          };
+        }
       }
     }
 
+    if (this.isSimulationEnabled()) {
+      return {
+        status: 'simulated',
+        transactionHash: generateMockTxHash(),
+        blockNumber: null,
+        confirmed: false,
+        isSimulated: true,
+        label: '[SIMULATED - NO ON-CHAIN RECEIPT]',
+      };
+    }
+
     return {
-      success: true,
-      transactionHash: generateMockTxHash(),
-      blockNumber: Math.floor(19846000 + Math.random() * 2000),
-      confirmed: true,
-      simulated: true,
+      status: 'failed',
+      transactionHash: null,
+      blockNumber: null,
+      confirmed: false,
+      isSimulated: false,
+      label: 'Blockchain relayer unavailable',
+      error: 'No RPC connection.',
     };
   }
 
@@ -179,24 +238,59 @@ export class BlockchainRelayer {
 
         if (receipt && receipt.status === 1) {
           return {
-            success: true,
+            status: 'confirmed',
             transactionHash: receipt.hash,
             blockNumber: receipt.blockNumber,
             confirmed: true,
-            simulated: false,
+            isSimulated: false,
+            label: 'Confirmed on Ethereum ledger',
+          };
+        } else {
+          return {
+            status: 'failed',
+            transactionHash: tx.hash,
+            blockNumber: null,
+            confirmed: false,
+            isSimulated: false,
+            label: 'Document anchoring reverted',
+            error: 'Anchoring reverted.',
           };
         }
       } catch (err: unknown) {
-        console.warn('Live blockchain document integrity call failed:', err);
+        const errMsg = err instanceof Error ? err.message : 'Blockchain error';
+        if (!this.isSimulationEnabled()) {
+          return {
+            status: 'failed',
+            transactionHash: null,
+            blockNumber: null,
+            confirmed: false,
+            isSimulated: false,
+            label: 'Document anchoring failed',
+            error: errMsg,
+          };
+        }
       }
     }
 
+    if (this.isSimulationEnabled()) {
+      return {
+        status: 'simulated',
+        transactionHash: generateMockTxHash(),
+        blockNumber: null,
+        confirmed: false,
+        isSimulated: true,
+        label: '[SIMULATED - NO ON-CHAIN RECEIPT]',
+      };
+    }
+
     return {
-      success: true,
-      transactionHash: generateMockTxHash(),
-      blockNumber: Math.floor(19846000 + Math.random() * 2000),
-      confirmed: true,
-      simulated: true,
+      status: 'failed',
+      transactionHash: null,
+      blockNumber: null,
+      confirmed: false,
+      isSimulated: false,
+      label: 'Blockchain relayer unavailable',
+      error: 'No RPC connection.',
     };
   }
 }

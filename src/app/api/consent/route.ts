@@ -96,7 +96,7 @@ export async function POST(request: Request) {
       doctorName: doctor?.fullName || 'Physician',
       doctorSpecialty: doctor?.specialty,
       durationHours,
-      blockchainTxHash: onChainResult.transactionHash,
+      blockchainTxHash: onChainResult.transactionHash || undefined,
     });
 
     return NextResponse.json({
@@ -154,7 +154,7 @@ export async function DELETE(request: Request) {
     // Revoke in Supabase via ConsentService
     const revokedGrant = await ConsentService.revokeGrant(grantId, user.id);
     if (revokedGrant) {
-      revokedGrant.blockchainTxHash = onChainResult.transactionHash;
+      revokedGrant.blockchainTxHash = onChainResult.transactionHash || undefined;
     }
 
     return NextResponse.json({
