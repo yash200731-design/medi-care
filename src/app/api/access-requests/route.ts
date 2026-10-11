@@ -44,7 +44,13 @@ export async function GET(request: Request) {
       return NextResponse.json({ requests: results });
     }
 
-    return NextResponse.json({ requests: [] });
+    return NextResponse.json(
+      {
+        error: 'FORBIDDEN',
+        message: `Access Denied (403): User role '${user.role}' is not authorized to inspect access requests.`,
+      },
+      { status: 403 }
+    );
   } catch (err: unknown) {
     if (err instanceof AuthError) {
       return NextResponse.json({ error: err.code, message: err.message }, { status: err.statusCode });

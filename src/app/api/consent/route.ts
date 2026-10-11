@@ -38,7 +38,13 @@ export async function GET(request: Request) {
       return NextResponse.json({ grants: results });
     }
 
-    return NextResponse.json({ grants: [] });
+    return NextResponse.json(
+      {
+        error: 'FORBIDDEN',
+        message: `Access Denied (403): User role '${user.role}' is not authorized to inspect consent grants.`,
+      },
+      { status: 403 }
+    );
   } catch (err: unknown) {
     if (err instanceof AuthError) {
       return NextResponse.json({ error: err.code, message: err.message }, { status: err.statusCode });

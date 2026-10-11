@@ -105,8 +105,49 @@ async function runPhase1Tests() {
     assert.strictEqual(res.status, 401);
   });
 
+  await test('GET /api/storage/download without token returns 401 Unauthorized', async () => {
+    const res = await fetch(`${BASE_URL}/api/storage/download?path=test&patientId=test&expires=9999999999&sig=test`);
+    assert.strictEqual(res.status, 401);
+  });
+
   // --- SECTION 2: Impersonation Protection & Header Bypass Prevention ---
   console.log('\n--- 2. Testing Impersonation Protection (Ignoring client headers) ---');
+
+  await test('POST /api/auth/session with non-existent arbitrary userId returns 404 Not Found', async () => {
+    const res = await fetch(`${BASE_URL}/api/auth/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: 'arbitrary-attacker-uuid-999' }),
+    });
+    assert.strictEqual(res.status, 404);
+    const data = await res.json();
+    assert.strictEqual(data.error, 'NOT_FOUND');
+  });
+
+  await test('POST /api/auth/session with empty payload returns 400 Bad Request', async () => {
+    const res = await fetch(`${BASE_URL}/api/auth/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.strictEqual(res.status, 400);
+    const data = await res.json();
+    assert.strictEqual(data.error, 'BAD_REQUEST');
+  });
+
+  await test('POST /api/auth/session with valid demo persona sets demo headers and warning', async () => {
+    const res = await fetch(`${BASE_URL}/api/auth/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: 'patient-sarah-101' }),
+    });
+    assert.strictEqual(res.status, 200);
+    const data = await res.json();
+    assert.strictEqual(data.authenticated, true);
+    assert.strictEqual(data.isDemoSession, true);
+    assert.ok(data.warning, 'Demo session must include explicit warning');
+    assert.strictEqual(res.headers.get('x-medivault-demo-auth'), 'true');
+  });
 
   await test('Sending x-viewer-id header without session is ignored and returns 401', async () => {
     const res = await fetch(`${BASE_URL}/api/records/rec-cardiac-mri-001/access`, {
@@ -239,6 +280,38 @@ async function runPhase1Tests() {
     assert.strictEqual(res.status, 403);
     const data = await res.json();
     assert.strictEqual(data.error, 'ACCESS_DENIED_REVOKED');
+  });
+
+  await test('Doctor Dr. Thorne attempting to submit access request with another doctorId returns 403 Forbidden', async () => {
+    const res = await fetch(`${BASE_URL}/api/access-requests`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${drThorne.token}`,
+      },
+      body: JSON.stringify({
+        doctorId: 'doctor-patel-202', // Impersonation attempt
+        patientId: 'patient-sarah-101',
+        purpose: 'Impersonated consultation request',
+      }),
+    });
+    assert.strictEqual(res.status, 403);
+  });
+
+  await test('Patient Sarah attempting to grant consent on behalf of another patient returns 403 Forbidden', async () => {
+    const res = await fetch(`${BASE_URL}/api/consent`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sarah.token}`,
+      },
+      body: JSON.stringify({
+        patientId: 'patient-elena-103', // Impersonation attempt
+        doctorId: 'doctor-thorne-201',
+        durationHours: 24,
+      }),
+    });
+    assert.strictEqual(res.status, 403);
   });
 
   // --- SECTION 4: Legitimate Authorized Flows (200 OK) ---

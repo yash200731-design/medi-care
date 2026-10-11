@@ -83,7 +83,13 @@ export async function GET(request: Request) {
       return NextResponse.json({ records });
     }
 
-    return NextResponse.json({ records: [] });
+    return NextResponse.json(
+      {
+        error: 'FORBIDDEN',
+        message: `Access Denied (403): User role '${user.role}' is not authorized to query medical records.`,
+      },
+      { status: 403 }
+    );
   } catch (err: unknown) {
     if (err instanceof AuthError) {
       return NextResponse.json({ error: err.code, message: err.message }, { status: err.statusCode });
