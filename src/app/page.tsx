@@ -15,15 +15,19 @@ import {
   User,
   History,
   CheckCircle2,
-  XCircle,
   Database,
   ExternalLink,
 } from 'lucide-react';
-import { DemoStore } from '@/lib/store/demo-store';
 
 export default function HomePage() {
-  const handleSelectRole = (userId: string, targetPath: string) => {
-    DemoStore.setCurrentUser(userId);
+  const handleSelectRole = async (userId: string, targetPath: string) => {
+    try {
+      await fetch('/api/auth/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId }),
+      });
+    } catch {}
     window.location.href = targetPath;
   };
 

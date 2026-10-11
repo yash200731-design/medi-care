@@ -13,7 +13,6 @@ import {
   CheckCircle2,
   ChevronDown,
 } from 'lucide-react';
-import { DemoStore } from '@/lib/store/demo-store';
 import { UserProfile } from '@/types';
 import { DEMO_PATIENTS, DEMO_DOCTORS } from '@/lib/mock-data';
 
@@ -22,38 +21,80 @@ export default function Navbar() {
   const [currentUser, setCurrentUser] = useState<UserProfile>(DEMO_PATIENTS[0]);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
+  const [blockchainInfo, setBlockchainInfo] = useState<{
+    simulated: boolean;
+    network: string;
+    latestBlock: number | null;
+  }>({
+    simulated: true,
+    network: 'Simulation Mode',
+    latestBlock: null,
+  });
+  const [persistenceMode, setPersistenceMode] = useState<string>('');
 
   useEffect(() => {
     setMounted(true);
-    const user = DemoStore.getCurrentUser();
-    setCurrentUser(user);
-    // Ensure server session cookie is established for API routes
-    fetch('/api/auth/session', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: user.id }),
-    }).catch(() => {});
+    // Fetch active session from server
+    fetch('/api/auth/session')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data && data.authenticated && data.user) {
+          setCurrentUser(data.user);
+        } else {
+          // Initialize default demo session with Sarah Chen
+          fetch('/api/auth/session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId: DEMO_PATIENTS[0].id }),
+          })
+            .then((r) => r.json())
+            .then((d) => {
+              if (d && d.user) setCurrentUser(d.user);
+            })
+            .catch(() => {});
+        }
+      })
+      .catch(() => {});
+
+    // Fetch live blockchain and persistence status
+    fetch('/api/audit')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d && d.blockchainStatus) {
+          setBlockchainInfo(d.blockchainStatus);
+        }
+        if (d && d.persistence) {
+          setPersistenceMode(d.persistence.label);
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const handleSwitchUser = async (userId: string) => {
-    const updated = DemoStore.setCurrentUser(userId);
-    setCurrentUser(updated);
     setIsDropdownOpen(false);
-    // Establish verified server session cookie
     try {
-      await fetch('/api/auth/session', {
+      const res = await fetch('/api/auth/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId }),
       });
+      const data = await res.json();
+      if (data && data.user) {
+        setCurrentUser(data.user);
+      }
     } catch {}
-    // Reload page or trigger storage event to synchronize all views
     window.location.reload();
   };
 
-  const handleReset = () => {
-    if (confirm('Reset sandbox to initial demo dataset?')) {
-      DemoStore.resetDemoState();
+  const handleReset = async () => {
+    if (confirm('Reset active session to Sarah Chen (Patient)?')) {
+      try {
+        await fetch('/api/auth/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: DEMO_PATIENTS[0].id }),
+        });
+      } catch {}
       window.location.reload();
     }
   };
@@ -130,14 +171,22 @@ export default function Navbar() {
 
           {/* Right Side: Ledger Status & Role Switcher */}
           <div className="flex items-center space-x-3">
-            {/* Blockchain Indicator */}
+            {/* Persistence & Ledger Status Badges */}
+            {persistenceMode && (
+              <span className="hidden xl:inline-block px-2.5 py-1 text-[10px] font-semibold rounded-md bg-amber-50 text-amber-800 border border-amber-200">
+                {persistenceMode}
+              </span>
+            )}
             <div className="hidden lg:flex items-center space-x-2 px-3 py-1.5 rounded-full bg-slate-50 border border-slate-200 text-xs">
               <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                <span className={`relative inline-flex rounded-full h-2 w-2 ${blockchainInfo.simulated ? 'bg-purple-500' : 'bg-emerald-500'}`}></span>
               </span>
-              <span className="text-slate-600 font-medium">Hardhat EVM</span>
-              <span className="text-slate-400 font-mono text-[10px]">#19846k</span>
+              <span className="text-slate-600 font-medium">
+                {blockchainInfo.simulated ? 'Simulation Mode' : blockchainInfo.network}
+              </span>
+              {blockchainInfo.latestBlock !== null && (
+                <span className="text-slate-400 font-mono text-[10px]">#{blockchainInfo.latestBlock}</span>
+              )}
             </div>
 
             {/* Role Switcher Dropdown */}

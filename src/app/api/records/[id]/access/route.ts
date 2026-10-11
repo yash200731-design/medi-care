@@ -1,8 +1,10 @@
 import { NextResponse } from 'next/server';
 import { requireAuth, AuthError } from '@/lib/auth/server';
 import { ConsentService } from '@/lib/dal/consent';
+import { RecordsService } from '@/lib/dal/records';
+import { AuditService } from '@/lib/dal/audit';
+import { getPersistenceMetadata } from '@/lib/dal/persistence';
 import { StorageService } from '@/lib/storage/service';
-import { INITIAL_RECORDS } from '@/lib/mock-data';
 
 export async function GET(
   request: Request,
@@ -15,11 +17,11 @@ export async function GET(
 
     const { id: recordId } = params;
 
-    // 2. Find target medical record
-    const record = INITIAL_RECORDS.find((r) => r.id === recordId);
+    // 2. Find target medical record via RecordsService
+    const record = await RecordsService.getRecordById(recordId);
     if (!record) {
       return NextResponse.json(
-        { error: 'NOT_FOUND', message: 'Medical record not found.' },
+        { error: 'NOT_FOUND', message: 'Medical record not found.', persistence: getPersistenceMetadata() },
         { status: 404 }
       );
     }
@@ -28,6 +30,25 @@ export async function GET(
     const accessCheck = await ConsentService.verifyFileAccess(user.id, user.role, record);
 
     if (!accessCheck.allowed) {
+      await AuditService.logEvent({
+        actorId: user.id,
+        actorName: user.fullName,
+        actorRole: user.role,
+        action: 'ACCESS_DENIED_UNAUTHORIZED',
+        targetPatientId: record.patientId,
+        targetPatientName: record.patientName,
+        targetDoctorId: user.id,
+        targetDoctorName: user.fullName,
+        targetRecordId: record.id,
+        targetRecordTitle: record.title,
+        details: {
+          error: accessCheck.error,
+          message: accessCheck.message,
+        },
+        confirmedOnChain: false,
+        isSimulated: true,
+      });
+
       return NextResponse.json(
         {
           authorized: false,
@@ -38,6 +59,7 @@ export async function GET(
           expiresAt: accessCheck.grant?.expiresAt,
           revokedAt: accessCheck.grant?.revokedAt,
           blockchainTxHash: accessCheck.grant?.blockchainTxHash,
+          persistence: getPersistenceMetadata(),
         },
         { status: accessCheck.statusCode }
       );
@@ -53,6 +75,26 @@ export async function GET(
     const remainingMinutes = accessCheck.grant?.expiresAt
       ? Math.max(0, Math.round((new Date(accessCheck.grant.expiresAt).getTime() - Date.now()) / 60000))
       : undefined;
+
+    await AuditService.logEvent({
+      actorId: user.id,
+      actorName: user.fullName,
+      actorRole: user.role,
+      action: 'ACCESS_RECORD',
+      targetPatientId: record.patientId,
+      targetPatientName: record.patientName,
+      targetDoctorId: user.id,
+      targetDoctorName: user.fullName,
+      targetRecordId: record.id,
+      targetRecordTitle: record.title,
+      details: {
+        reason: accessCheck.reason,
+        grantId: accessCheck.grant?.id,
+      },
+      blockchainTxHash: accessCheck.grant?.blockchainTxHash,
+      confirmedOnChain: false,
+      isSimulated: true,
+    });
 
     return NextResponse.json({
       authorized: true,
@@ -70,11 +112,12 @@ export async function GET(
         signedStorageUrl,
       },
       message: accessCheck.message,
+      persistence: getPersistenceMetadata(),
     });
   } catch (err: unknown) {
     if (err instanceof AuthError) {
-      return NextResponse.json({ error: err.code, message: err.message }, { status: err.statusCode });
+      return NextResponse.json({ error: err.code, message: err.message, persistence: getPersistenceMetadata() }, { status: err.statusCode });
     }
-    return NextResponse.json({ error: 'INTERNAL_ERROR', message: 'Internal authorization error.' }, { status: 500 });
+    return NextResponse.json({ error: 'INTERNAL_ERROR', message: 'Internal authorization error.', persistence: getPersistenceMetadata() }, { status: 500 });
   }
 }

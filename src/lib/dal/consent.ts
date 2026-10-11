@@ -1,16 +1,14 @@
 import { createServerAdminClient } from '@/lib/supabase/server';
-import { INITIAL_GRANTS } from '@/lib/mock-data';
+import { isSupabaseConfigured, assertPersistenceAvailable } from './persistence';
+import { ServerStore } from './server-store';
 import { ConsentGrant, MedicalRecord, UserRole } from '@/types';
 
-// In-memory cache for fallback when remote Supabase database is unreachable/mock
-let inMemoryGrants: ConsentGrant[] = [...INITIAL_GRANTS];
-
 export function getInMemoryGrants(): ConsentGrant[] {
-  return inMemoryGrants;
+  return ServerStore.getGrants();
 }
 
 export function setInMemoryGrants(grants: ConsentGrant[]) {
-  inMemoryGrants = grants;
+  // Provided for compatibility
 }
 
 export interface GrantVerificationResult {
@@ -24,45 +22,148 @@ export interface GrantVerificationResult {
 
 export class ConsentService {
   /**
-   * Retrieves all consent grants for a given patient and doctor.
-   * Supabase PostgreSQL is the primary source of truth, with resilient in-memory fallback.
+   * Retrieves all consent grants for a given patient and doctor pair.
    */
   static async getGrants(patientId: string, doctorId: string): Promise<ConsentGrant[]> {
-    try {
-      const supabase = createServerAdminClient();
-      const { data, error } = await supabase
-        .from('consent_grants')
-        .select('*')
-        .eq('patient_id', patientId)
-        .eq('doctor_id', doctorId)
-        .order('created_at', { ascending: false });
+    assertPersistenceAvailable();
 
-      if (!error && data && data.length > 0) {
-        return data.map((row) => ({
-          id: row.id,
-          requestId: row.request_id,
-          patientId: row.patient_id,
-          doctorId: row.doctor_id,
-          grantedAt: row.granted_at,
-          expiresAt: row.expires_at,
-          isRevoked: row.is_revoked,
-          revokedAt: row.revoked_at,
-          blockchainTxHash: row.blockchain_tx_hash,
-          createdAt: row.created_at,
-        }));
-      }
-    } catch {
-      // Supabase database unavailable, using fallback
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createServerAdminClient();
+        const { data, error } = await supabase
+          .from('consent_grants')
+          .select('*')
+          .eq('patient_id', patientId)
+          .eq('doctor_id', doctorId)
+          .order('created_at', { ascending: false });
+
+        if (!error && data && data.length > 0) {
+          return data.map((row) => ({
+            id: row.id,
+            requestId: row.request_id,
+            patientId: row.patient_id,
+            doctorId: row.doctor_id,
+            grantedAt: row.granted_at,
+            expiresAt: row.expires_at,
+            isRevoked: row.is_revoked,
+            revokedAt: row.revoked_at,
+            blockchainTxHash: row.blockchain_tx_hash,
+            createdAt: row.created_at,
+          }));
+        }
+      } catch {}
     }
 
-    // In-memory source of truth
-    return inMemoryGrants.filter(
-      (g) => g.patientId === patientId && g.doctorId === doctorId
-    );
+    return ServerStore.getGrantsForPair(patientId, doctorId);
   }
 
   /**
-   * Records a new consent grant in Supabase.
+   * Retrieves a consent grant by its ID.
+   */
+  static async getGrantById(grantId: string): Promise<ConsentGrant | null> {
+    assertPersistenceAvailable();
+
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createServerAdminClient();
+        const { data, error } = await supabase
+          .from('consent_grants')
+          .select('*')
+          .eq('id', grantId)
+          .single();
+
+        if (!error && data) {
+          return {
+            id: data.id,
+            requestId: data.request_id,
+            patientId: data.patient_id,
+            doctorId: data.doctor_id,
+            grantedAt: data.granted_at,
+            expiresAt: data.expires_at,
+            isRevoked: data.is_revoked,
+            revokedAt: data.revoked_at,
+            blockchainTxHash: data.blockchain_tx_hash,
+            createdAt: data.created_at,
+          };
+        }
+      } catch {}
+    }
+
+    return ServerStore.getGrantById(grantId) || null;
+  }
+
+  /**
+   * Retrieves all consent grants issued by a patient.
+   */
+  static async getAllGrantsForPatient(patientId: string): Promise<ConsentGrant[]> {
+    assertPersistenceAvailable();
+
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createServerAdminClient();
+        const { data, error } = await supabase
+          .from('consent_grants')
+          .select('*')
+          .eq('patient_id', patientId)
+          .order('created_at', { ascending: false });
+
+        if (!error && data) {
+          return data.map((row) => ({
+            id: row.id,
+            requestId: row.request_id,
+            patientId: row.patient_id,
+            doctorId: row.doctor_id,
+            grantedAt: row.granted_at,
+            expiresAt: row.expires_at,
+            isRevoked: row.is_revoked,
+            revokedAt: row.revoked_at,
+            blockchainTxHash: row.blockchain_tx_hash,
+            createdAt: row.created_at,
+          }));
+        }
+      } catch {}
+    }
+
+    return ServerStore.getGrants().filter((g) => g.patientId === patientId);
+  }
+
+  /**
+   * Retrieves all consent grants assigned to a doctor.
+   */
+  static async getAllGrantsForDoctor(doctorId: string): Promise<ConsentGrant[]> {
+    assertPersistenceAvailable();
+
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createServerAdminClient();
+        const { data, error } = await supabase
+          .from('consent_grants')
+          .select('*')
+          .eq('doctor_id', doctorId)
+          .order('created_at', { ascending: false });
+
+        if (!error && data) {
+          return data.map((row) => ({
+            id: row.id,
+            requestId: row.request_id,
+            patientId: row.patient_id,
+            doctorId: row.doctor_id,
+            grantedAt: row.granted_at,
+            expiresAt: row.expires_at,
+            isRevoked: row.is_revoked,
+            revokedAt: row.revoked_at,
+            blockchainTxHash: row.blockchain_tx_hash,
+            createdAt: row.created_at,
+          }));
+        }
+      } catch {}
+    }
+
+    return ServerStore.getGrants().filter((g) => g.doctorId === doctorId);
+  }
+
+  /**
+   * Records a new consent grant in Supabase or authoritative ServerStore.
    */
   static async createGrant(params: {
     id: string;
@@ -75,6 +176,8 @@ export class ConsentService {
     durationHours: number;
     blockchainTxHash?: string;
   }): Promise<ConsentGrant> {
+    assertPersistenceAvailable();
+
     const now = new Date();
     const expiresAt = new Date(now.getTime() + Number(params.durationHours) * 3600 * 1000);
 
@@ -93,62 +196,59 @@ export class ConsentService {
       createdAt: now.toISOString(),
     };
 
-    // Attempt to write to Supabase
-    try {
-      const supabase = createServerAdminClient();
-      await supabase.from('consent_grants').insert({
-        id: newGrant.id,
-        request_id: newGrant.requestId,
-        patient_id: newGrant.patientId,
-        doctor_id: newGrant.doctorId,
-        granted_at: newGrant.grantedAt,
-        expires_at: newGrant.expiresAt,
-        is_revoked: false,
-        blockchain_tx_hash: newGrant.blockchainTxHash,
-        created_at: newGrant.createdAt,
-      });
-    } catch {
-      // In-memory fallback
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createServerAdminClient();
+        await supabase.from('consent_grants').insert({
+          id: newGrant.id,
+          request_id: newGrant.requestId,
+          patient_id: newGrant.patientId,
+          doctor_id: newGrant.doctorId,
+          granted_at: newGrant.grantedAt,
+          expires_at: newGrant.expiresAt,
+          is_revoked: false,
+          blockchain_tx_hash: newGrant.blockchainTxHash,
+          created_at: newGrant.createdAt,
+        });
+      } catch {}
     }
 
-    inMemoryGrants = [newGrant, ...inMemoryGrants];
-    return newGrant;
+    // Also update request status in server store if linked
+    if (params.requestId) {
+      ServerStore.updateRequestStatus(params.requestId, 'approved');
+    }
+
+    return ServerStore.addGrant(newGrant);
   }
 
   /**
-   * Immediately revokes a consent grant in Supabase.
+   * Immediately revokes a consent grant.
    */
   static async revokeGrant(grantId: string, revokingPatientId: string): Promise<ConsentGrant | null> {
-    const now = new Date().toISOString();
+    assertPersistenceAvailable();
 
-    // 1. Locate grant
-    const target = inMemoryGrants.find((g) => g.id === grantId);
+    const target = ServerStore.getGrantById(grantId);
     if (!target) return null;
 
-    // 2. Strict patient ownership check
     if (target.patientId !== revokingPatientId) {
-      throw new Error('UNAUTHORIZED_REVOCATION');
+      throw new Error('UNAUTHORIZED_REVOCATION: Grant belongs to another patient.');
     }
 
-    target.isRevoked = true;
-    target.revokedAt = now;
-
-    // 3. Update Supabase
-    try {
-      const supabase = createServerAdminClient();
-      await supabase
-        .from('consent_grants')
-        .update({
-          is_revoked: true,
-          revoked_at: now,
-        })
-        .eq('id', grantId)
-        .eq('patient_id', revokingPatientId);
-    } catch {
-      // In-memory fallback
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createServerAdminClient();
+        await supabase
+          .from('consent_grants')
+          .update({
+            is_revoked: true,
+            revoked_at: new Date().toISOString(),
+          })
+          .eq('id', grantId)
+          .eq('patient_id', revokingPatientId);
+      } catch {}
     }
 
-    return target;
+    return ServerStore.revokeGrant(grantId, revokingPatientId);
   }
 
   /**

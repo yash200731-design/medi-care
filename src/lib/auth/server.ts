@@ -6,12 +6,43 @@ import { UserProfile, UserRole } from '@/types';
 
 export const SESSION_COOKIE_NAME = 'medivault_session_token';
 
-// Server-side secret used for signing session tokens
-// NEVER exposed to client-side code
-const SERVER_SECRET =
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.SESSION_SECRET ||
-  'medivault_zero_trust_server_secret_key_2026_production_grade';
+/**
+ * Retrieves the cryptographic secret for server-side token signing and verification.
+ * Strictly requires SESSION_SECRET in the environment.
+ * Rejects insecure defaults and fails safely with AuthError(500).
+ */
+export function getSessionSecret(): string {
+  const secret = process.env.SESSION_SECRET;
+  if (!secret || typeof secret !== 'string' || secret.trim().length === 0) {
+    throw new AuthError(
+      'CONFIG_ERROR',
+      'Server configuration error: SESSION_SECRET is not configured. An explicitly configured secret is required.',
+      500
+    );
+  }
+  if (secret.length < 32) {
+    throw new AuthError(
+      'CONFIG_ERROR',
+      'Server configuration error: SESSION_SECRET must be at least 32 characters in length.',
+      500
+    );
+  }
+  return secret;
+}
+
+/**
+ * Determines whether the local demo persona selector is permitted.
+ * Strictly prohibited in production environments (process.env.NODE_ENV === 'production').
+ */
+export function isDemoAuthAllowed(): boolean {
+  if (process.env.NODE_ENV === 'production') {
+    return false;
+  }
+  return (
+    process.env.ENABLE_DEMO_AUTH === 'true' ||
+    process.env.NEXT_PUBLIC_DEMO_MODE === 'true'
+  );
+}
 
 export interface AuthenticatedUser {
   id: string;
@@ -39,12 +70,14 @@ export class AuthError extends Error {
  * Creates a cryptographically signed session token (HMAC-SHA256).
  */
 export function createSignedSessionToken(user: AuthenticatedUser, expiresInSeconds: number = 86400): string {
+  const secret = getSessionSecret();
   const header = { alg: 'HS256', typ: 'JWT' };
   const payload = {
     sub: user.id,
     role: user.role,
     name: user.fullName,
     email: user.email,
+    isDemo: isDemoAuthAllowed(),
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + expiresInSeconds,
   };
@@ -54,7 +87,7 @@ export function createSignedSessionToken(user: AuthenticatedUser, expiresInSecon
   const signatureInput = `${encodedHeader}.${encodedPayload}`;
 
   const signature = crypto
-    .createHmac('sha256', SERVER_SECRET)
+    .createHmac('sha256', secret)
     .update(signatureInput)
     .digest('base64url');
 
@@ -65,6 +98,7 @@ export function createSignedSessionToken(user: AuthenticatedUser, expiresInSecon
  * Verifies a signed session token using constant-time HMAC comparison.
  */
 export function verifySessionToken(token: string): { sub: string; role: UserRole; exp: number } | null {
+  const secret = getSessionSecret();
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
@@ -73,7 +107,7 @@ export function verifySessionToken(token: string): { sub: string; role: UserRole
     const signatureInput = `${encodedHeader}.${encodedPayload}`;
 
     const expectedSignature = crypto
-      .createHmac('sha256', SERVER_SECRET)
+      .createHmac('sha256', secret)
       .update(signatureInput)
       .digest('base64url');
 
@@ -91,7 +125,8 @@ export function verifySessionToken(token: string): { sub: string; role: UserRole
     }
 
     return payload;
-  } catch {
+  } catch (err: unknown) {
+    if (err instanceof AuthError) throw err;
     return null;
   }
 }

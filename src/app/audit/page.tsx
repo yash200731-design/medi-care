@@ -17,14 +17,29 @@ import {
   FileCheck2,
   Sparkles,
 } from 'lucide-react';
-import { DemoStore, computeSha256 } from '@/lib/store/demo-store';
+import { computeSha256 } from '@/lib/store/demo-store';
 import { AuditEvent } from '@/types';
-import { INITIAL_RECORDS } from '@/lib/mock-data';
 
 export default function AuditPage() {
   const [mounted, setMounted] = useState(false);
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isVerifying, setIsVerifying] = useState<boolean>(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [persistenceMode, setPersistenceMode] = useState<string>('');
+  const [blockchainInfo, setBlockchainInfo] = useState<{
+    connected: boolean;
+    simulated: boolean;
+    network: string;
+    latestBlock: number | null;
+    message?: string;
+  }>({
+    connected: false,
+    simulated: true,
+    network: 'Simulation Mode',
+    latestBlock: null,
+  });
 
   // Verifier tool state
   const [verifyInput, setVerifyInput] = useState('');
@@ -34,19 +49,39 @@ export default function AuditPage() {
     recordTitle?: string;
     patientName?: string;
     txHash?: string;
-    blockNumber?: number;
+    blockNumber?: number | null;
     createdAt?: string;
+    status?: string;
+    message?: string;
   } | null>(null);
+
+  const fetchAuditData = async () => {
+    setIsLoading(true);
+    setErrorMessage(null);
+    try {
+      const res = await fetch('/api/audit', { credentials: 'include' });
+      if (!res.ok) {
+        throw new Error('Failed to retrieve audit trail from server.');
+      }
+      const data = await res.json();
+      setEvents(data.events || []);
+      if (data.blockchainStatus) {
+        setBlockchainInfo(data.blockchainStatus);
+      }
+      if (data.persistence?.label) {
+        setPersistenceMode(data.persistence.label);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Error syncing audit trail';
+      setErrorMessage(msg);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   useEffect(() => {
     setMounted(true);
-    const user = DemoStore.getCurrentUser();
-    fetch('/api/auth/session', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: user.id }),
-    }).catch(() => {});
-    setEvents(DemoStore.getAuditEvents());
+    fetchAuditData();
   }, []);
 
   const handleCopy = (text: string) => {
@@ -59,33 +94,54 @@ export default function AuditPage() {
     e.preventDefault();
     if (!verifyInput.trim()) return;
 
-    let targetHash = verifyInput.trim();
+    setIsVerifying(true);
+    setErrorMessage(null);
+    try {
+      let targetHash = verifyInput.trim();
 
-    // If input is text instead of 64-char hex, compute SHA-256
-    if (targetHash.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(targetHash)) {
-      targetHash = await computeSha256(targetHash);
-    }
+      // If input is raw text instead of 64-char hex, compute SHA-256
+      if (targetHash.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(targetHash)) {
+        targetHash = await computeSha256(targetHash);
+      }
 
-    const currentRecords = DemoStore.getRecords();
-    const match = currentRecords.find(
-      (r) => r.documentSha256.toLowerCase() === targetHash.toLowerCase()
-    );
-
-    if (match) {
-      setVerificationResult({
-        testedHash: targetHash,
-        matched: true,
-        recordTitle: match.title,
-        patientName: match.patientName,
-        txHash: match.blockchainTxHash,
-        blockNumber: 19842100,
-        createdAt: match.createdAt,
+      // Call authoritative POST /api/audit
+      const res = await fetch('/api/audit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ documentSha256: targetHash }),
       });
-    } else {
-      setVerificationResult({
-        testedHash: targetHash,
-        matched: false,
-      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || 'Verification request failed');
+      }
+
+      if (data.verified) {
+        setVerificationResult({
+          testedHash: targetHash,
+          matched: true,
+          recordTitle: data.title,
+          patientName: data.patientName,
+          txHash: data.blockchainTxHash,
+          blockNumber: null, // STRICT: No mock block numbers
+          createdAt: data.anchoredAt,
+          status: data.status,
+          message: data.message,
+        });
+      } else {
+        setVerificationResult({
+          testedHash: targetHash,
+          matched: false,
+          status: data.status,
+          message: data.message,
+        });
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Error executing verification';
+      setErrorMessage(msg);
+    } finally {
+      setIsVerifying(false);
     }
   };
 
@@ -121,11 +177,37 @@ export default function AuditPage() {
           </div>
           <div className="text-teal-400 font-bold select-all">{contractAddress}</div>
           <div className="text-[10px] text-slate-400 flex items-center space-x-2">
-            <span className="flex h-2 w-2 rounded-full bg-emerald-400"></span>
-            <span>EVM ChainId: 31337 &bull; Hardhat Local / Sepolia</span>
+            <span className={`flex h-2 w-2 rounded-full ${blockchainInfo.simulated ? 'bg-purple-400' : 'bg-emerald-400'}`}></span>
+            <span>{blockchainInfo.network}</span>
+            {blockchainInfo.latestBlock !== null && (
+              <span>&bull; Block #{blockchainInfo.latestBlock}</span>
+            )}
           </div>
+          {persistenceMode && (
+            <div className="text-[10px] text-amber-300 font-semibold pt-1 border-t border-slate-700">
+              Storage: {persistenceMode}
+            </div>
+          )}
         </div>
       </div>
+
+      {/* Error Alert */}
+      {errorMessage && (
+        <div className="bg-rose-50 border border-rose-200 text-rose-800 px-4 py-3 rounded-xl flex items-center justify-between shadow-xs">
+          <div className="text-sm font-semibold">{errorMessage}</div>
+          <button onClick={() => setErrorMessage(null)}>
+            <XCircle className="h-4 w-4 text-rose-600" />
+          </button>
+        </div>
+      )}
+
+      {/* Loading Indicator */}
+      {isLoading && (
+        <div className="bg-blue-50 border border-blue-200 text-blue-800 px-4 py-2.5 rounded-xl text-xs flex items-center space-x-2">
+          <Clock className="h-4 w-4 text-blue-600 animate-spin" />
+          <span>Synchronizing immutable audit trail from server-anchored events...</span>
+        </div>
+      )}
 
       {/* Interactive Tool: Document Integrity Verifier */}
       <div className="bg-white rounded-3xl border border-slate-200/90 p-6 sm:p-8 shadow-xs space-y-6">
@@ -151,10 +233,11 @@ export default function AuditPage() {
             />
             <button
               type="submit"
+              disabled={isVerifying}
               className="px-6 py-3 rounded-xl bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs shadow-md transition-colors flex items-center justify-center space-x-2 shrink-0"
             >
               <Search className="h-4 w-4" />
-              <span>Verify Integrity</span>
+              <span>{isVerifying ? 'Verifying...' : 'Verify Integrity'}</span>
             </button>
           </div>
 
@@ -210,8 +293,8 @@ export default function AuditPage() {
               <div className="space-y-1.5 flex-1">
                 <div className="font-bold text-sm">
                   {verificationResult.matched
-                    ? '100% AUTHENTIC: Cryptographic Integrity Confirmed on Ledger'
-                    : 'VERIFICATION FAILED: Hash Altered or Not Found on Ledger'}
+                    ? '100% AUTHENTIC: Cryptographic Integrity Confirmed by Ledger'
+                    : 'VERIFICATION FAILED: Hash Altered or Not Found in Registry'}
                 </div>
 
                 <div className="text-xs font-mono break-all text-slate-700">
@@ -228,9 +311,15 @@ export default function AuditPage() {
                       <span className="font-bold">Patient Owner:</span>{' '}
                       {verificationResult.patientName}
                     </div>
-                    <div className="font-mono text-[11px] text-emerald-800">
-                      Anchor Tx: {verificationResult.txHash} &bull; Block #{' '}
-                      {verificationResult.blockNumber}
+                    <div className="font-mono text-[11px] text-emerald-800 flex flex-wrap gap-2 items-center">
+                      <span>Anchor Tx: {verificationResult.txHash || 'Simulated Proof'}</span>
+                      {verificationResult.blockNumber ? (
+                        <span>&bull; Block #{verificationResult.blockNumber}</span>
+                      ) : (
+                        <span className="text-purple-700 font-bold bg-purple-100/70 px-1.5 py-0.5 rounded text-[10px]">
+                          [SIMULATED - NO ON-CHAIN BLOCK]
+                        </span>
+                      )}
                     </div>
                   </div>
                 ) : (

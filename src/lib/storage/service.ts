@@ -1,12 +1,7 @@
 import crypto from 'crypto';
 import { createServerAdminClient } from '@/lib/supabase/server';
 import { ConsentService } from '@/lib/dal/consent';
-import { AuthenticatedUser } from '@/lib/auth/server';
-
-const STORAGE_SECRET =
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.SESSION_SECRET ||
-  'medivault_storage_secure_signing_secret_2026';
+import { AuthenticatedUser, getSessionSecret } from '@/lib/auth/server';
 
 export const MEDICAL_RECORDS_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'medical-records';
 
@@ -44,8 +39,9 @@ export class StorageService {
     const expires = Date.now() + expiresInSeconds * 1000;
     const signatureInput = `${storagePath}:${patientId}:${expires}`;
 
+    const signingSecret = getSessionSecret();
     const sig = crypto
-      .createHmac('sha256', STORAGE_SECRET)
+      .createHmac('sha256', signingSecret)
       .update(signatureInput)
       .digest('base64url');
 
@@ -94,9 +90,10 @@ export class StorageService {
     }
 
     // 2. Cryptographic HMAC signature check (constant-time)
+    const signingSecret = getSessionSecret();
     const expectedInput = `${path}:${patientId}:${expires}`;
     const expectedSig = crypto
-      .createHmac('sha256', STORAGE_SECRET)
+      .createHmac('sha256', signingSecret)
       .update(expectedInput)
       .digest('base64url');
 
