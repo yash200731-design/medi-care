@@ -1,17 +1,10 @@
 import { NextResponse } from 'next/server';
 import { requireAuth, requireRole, AuthError } from '@/lib/auth/server';
-import { INITIAL_REQUESTS, DEMO_PATIENTS } from '@/lib/mock-data';
+import { DEMO_PATIENTS } from '@/lib/mock-data';
+import { RequestsService } from '@/lib/dal/requests';
+import { AuditService } from '@/lib/dal/audit';
+import { getPersistenceMetadata } from '@/lib/dal/persistence';
 import { AccessRequest } from '@/types';
-
-let apiRequests: AccessRequest[] = [...INITIAL_REQUESTS];
-
-function getApiRequests(): AccessRequest[] {
-  return apiRequests;
-}
-
-function setApiRequests(requests: AccessRequest[]) {
-  apiRequests = requests;
-}
 
 export async function GET(request: Request) {
   try {
@@ -20,42 +13,26 @@ export async function GET(request: Request) {
     const filterPatientId = searchParams.get('patientId');
     const filterDoctorId = searchParams.get('doctorId');
 
-    // 1. Patient role: can ONLY view requests directed to them
-    if (user.role === 'patient') {
-      if (filterPatientId && filterPatientId !== user.id) {
-        return NextResponse.json(
-          { error: 'FORBIDDEN', message: 'Patients can only inspect access requests directed to their identity.' },
-          { status: 403 }
-        );
-      }
-      const results = apiRequests.filter((r) => r.patientId === user.id);
-      return NextResponse.json({ requests: results });
-    }
-
-    // 2. Doctor role: can ONLY view requests created by them
-    if (user.role === 'doctor') {
-      if (filterDoctorId && filterDoctorId !== user.id) {
-        return NextResponse.json(
-          { error: 'FORBIDDEN', message: 'Doctors can only inspect access requests created by their identity.' },
-          { status: 403 }
-        );
-      }
-      const results = apiRequests.filter((r) => r.doctorId === user.id);
-      return NextResponse.json({ requests: results });
-    }
-
-    return NextResponse.json(
-      {
-        error: 'FORBIDDEN',
-        message: `Access Denied (403): User role '${user.role}' is not authorized to inspect access requests.`,
-      },
-      { status: 403 }
+    const results = await RequestsService.getRequestsForUser(
+      user.id,
+      user.role,
+      filterPatientId,
+      filterDoctorId
     );
+
+    return NextResponse.json({
+      requests: results,
+      persistence: getPersistenceMetadata(),
+    });
   } catch (err: unknown) {
     if (err instanceof AuthError) {
-      return NextResponse.json({ error: err.code, message: err.message }, { status: err.statusCode });
+      return NextResponse.json({ error: err.code, message: err.message, persistence: getPersistenceMetadata() }, { status: err.statusCode });
     }
-    return NextResponse.json({ error: 'INTERNAL_ERROR', message: 'Failed to retrieve access requests.' }, { status: 500 });
+    const message = err instanceof Error ? err.message : 'Failed to retrieve access requests.';
+    if (message.startsWith('FORBIDDEN')) {
+      return NextResponse.json({ error: 'FORBIDDEN', message, persistence: getPersistenceMetadata() }, { status: 403 });
+    }
+    return NextResponse.json({ error: 'INTERNAL_ERROR', message, persistence: getPersistenceMetadata() }, { status: 500 });
   }
 }
 
@@ -73,6 +50,7 @@ export async function POST(request: Request) {
         {
           error: 'FORBIDDEN',
           message: 'Access Denied (403): Impersonation attempt detected. Cannot request access using another doctor\'s identity.',
+          persistence: getPersistenceMetadata(),
         },
         { status: 403 }
       );
@@ -80,7 +58,7 @@ export async function POST(request: Request) {
 
     if (!patientId || !purpose) {
       return NextResponse.json(
-        { error: 'BAD_REQUEST', message: 'patientId and purpose are required.' },
+        { error: 'BAD_REQUEST', message: 'patientId and purpose are required.', persistence: getPersistenceMetadata() },
         { status: 400 }
       );
     }
@@ -103,17 +81,37 @@ export async function POST(request: Request) {
       updatedAt: new Date().toISOString(),
     };
 
-    apiRequests = [newRequest, ...apiRequests];
+    const savedRequest = await RequestsService.createRequest(newRequest);
+
+    // Authoritative audit event
+    await AuditService.logEvent({
+      actorId: user.id,
+      actorName: user.fullName,
+      actorRole: 'doctor',
+      action: 'REQUEST_ACCESS',
+      targetPatientId: patientId,
+      targetPatientName: patient?.fullName || 'Patient',
+      targetDoctorId: user.id,
+      targetDoctorName: user.fullName,
+      details: {
+        purpose,
+        requestId: newRequest.id,
+        durationHours: newRequest.requestedDurationHours,
+      },
+      confirmedOnChain: false,
+      isSimulated: true,
+    });
 
     return NextResponse.json({
       success: true,
-      request: newRequest,
+      request: savedRequest,
       message: 'Access request securely dispatched to patient medical vault.',
+      persistence: getPersistenceMetadata(),
     });
   } catch (err: unknown) {
     if (err instanceof AuthError) {
-      return NextResponse.json({ error: err.code, message: err.message }, { status: err.statusCode });
+      return NextResponse.json({ error: err.code, message: err.message, persistence: getPersistenceMetadata() }, { status: err.statusCode });
     }
-    return NextResponse.json({ error: 'INTERNAL_ERROR', message: 'Server error processing request.' }, { status: 500 });
+    return NextResponse.json({ error: 'INTERNAL_ERROR', message: 'Server error processing request.', persistence: getPersistenceMetadata() }, { status: 500 });
   }
 }

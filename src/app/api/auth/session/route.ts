@@ -149,7 +149,12 @@ export async function POST(request: Request) {
   }
 }
 
+import { ServerStore } from '@/lib/dal/server-store';
+
 export async function DELETE() {
+  if (isDemoAuthAllowed()) {
+    ServerStore.resetToInitial();
+  }
   const response = NextResponse.json({
     success: true,
     authenticated: false,

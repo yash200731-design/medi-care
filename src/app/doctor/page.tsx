@@ -19,14 +19,20 @@ import {
   X,
   History,
 } from 'lucide-react';
-import { DemoStore } from '@/lib/store/demo-store';
-import { MedicalRecord, UserProfile, AccessCheckResult } from '@/types';
+import { MedicalRecord, UserProfile, AccessCheckResult, ConsentGrant, AccessRequest } from '@/types';
 import { DEMO_DOCTORS, DEMO_PATIENTS } from '@/lib/mock-data';
 
 export default function DoctorPortal() {
   const [mounted, setMounted] = useState(false);
   const [selectedPatientId, setSelectedPatientId] = useState<string>(DEMO_PATIENTS[0].id);
   const [activeDoctor, setActiveDoctor] = useState<UserProfile>(DEMO_DOCTORS[0]);
+
+  // Server Data State
+  const [allRecords, setAllRecords] = useState<MedicalRecord[]>([]);
+  const [doctorGrants, setDoctorGrants] = useState<ConsentGrant[]>([]);
+  const [doctorRequests, setDoctorRequests] = useState<AccessRequest[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Request modal state
   const [isRequestModalOpen, setIsRequestModalOpen] = useState(false);
@@ -43,29 +49,66 @@ export default function DoctorPortal() {
     record?: MedicalRecord;
   } | null>(null);
 
+  const fetchDoctorData = async (docId?: string) => {
+    setIsLoading(true);
+    setErrorMessage(null);
+    try {
+      const [recRes, grantRes, reqRes] = await Promise.all([
+        fetch('/api/records', { credentials: 'include' }),
+        fetch('/api/consent', { credentials: 'include' }),
+        fetch('/api/access-requests', { credentials: 'include' }),
+      ]);
+
+      if (!recRes.ok || !grantRes.ok || !reqRes.ok) {
+        throw new Error('Failed to retrieve clinical vault data from backend.');
+      }
+
+      const recData = await recRes.json();
+      const grantData = await grantRes.json();
+      const reqData = await reqRes.json();
+
+      setAllRecords(recData.records || []);
+      setDoctorGrants(grantData.grants || []);
+      setDoctorRequests(reqData.requests || []);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Error syncing doctor portal data';
+      setErrorMessage(msg);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   useEffect(() => {
     setMounted(true);
-    const user = DemoStore.getCurrentUser();
-    if (user.role === 'doctor') {
-      setActiveDoctor(user);
-      fetch('/api/auth/session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: user.id }),
-      }).catch(() => {});
-    } else {
-      setActiveDoctor(DEMO_DOCTORS[0]);
-      fetch('/api/auth/session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: DEMO_DOCTORS[0].id }),
-      }).catch(() => {});
-    }
+    // Resolve authenticated doctor session
+    fetch('/api/auth/session')
+      .then((res) => (res.ok ? res.json() : null))
+      .then(async (data) => {
+        if (data && data.authenticated && data.user?.role === 'doctor') {
+          setActiveDoctor(data.user);
+          await fetchDoctorData(data.user.id);
+        } else {
+          // Initialize session with Dr. Thorne
+          const initRes = await fetch('/api/auth/session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId: DEMO_DOCTORS[0].id }),
+          });
+          const initData = await initRes.json();
+          if (initData && initData.user) {
+            setActiveDoctor(initData.user);
+          }
+          await fetchDoctorData(DEMO_DOCTORS[0].id);
+        }
+      })
+      .catch(() => {
+        setIsLoading(false);
+      });
   }, []);
 
   const handleSwitchDoctor = async (docId: string) => {
-    const updated = DemoStore.setCurrentUser(docId);
-    setActiveDoctor(updated);
+    const doc = DEMO_DOCTORS.find((d) => d.id === docId) || DEMO_DOCTORS[0];
+    setActiveDoctor(doc);
     setAccessResult(null);
     try {
       await fetch('/api/auth/session', {
@@ -73,17 +116,18 @@ export default function DoctorPortal() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId: docId }),
       });
+      await fetchDoctorData(docId);
     } catch {}
   };
 
   const selectedPatient =
     DEMO_PATIENTS.find((p) => p.id === selectedPatientId) || DEMO_PATIENTS[0];
 
-  const patientRecords = DemoStore.getRecords().filter(
+  const patientRecords = allRecords.filter(
     (r) => r.patientId === selectedPatient.id
   );
 
-  const grantsForDoctor = DemoStore.getGrants().filter(
+  const grantsForDoctor = doctorGrants.filter(
     (g) => g.patientId === selectedPatient.id && g.doctorId === activeDoctor.id
   );
 
@@ -94,29 +138,13 @@ export default function DoctorPortal() {
     setEvaluatingRecordId(record.id);
 
     try {
-      // Query the real server-side authorization gateway
+      // Query the authoritative server-side authorization gateway
       const res = await fetch(`/api/records/${record.id}/access`, {
         credentials: 'include',
       });
       const data = await res.json();
 
       if (res.ok && data.authorized) {
-        DemoStore.logAuditEvent({
-          actorId: activeDoctor.id,
-          actorName: activeDoctor.fullName,
-          actorRole: 'doctor',
-          action: 'ACCESS_RECORD',
-          targetPatientId: record.patientId,
-          targetPatientName: record.patientName,
-          targetRecordId: record.id,
-          targetRecordTitle: record.title,
-          details: {
-            grantId: data.grant?.id,
-            reason: 'Authorized clinical review',
-          },
-          confirmedOnChain: true,
-        });
-
         setAccessResult({
           recordId: record.id,
           result: {
@@ -128,29 +156,6 @@ export default function DoctorPortal() {
           record: data.record || record,
         });
       } else {
-        const actionType =
-          data.error === 'ACCESS_DENIED_EXPIRED'
-            ? 'ACCESS_DENIED_EXPIRED'
-            : data.error === 'ACCESS_DENIED_REVOKED'
-            ? 'ACCESS_DENIED_REVOKED'
-            : 'ACCESS_DENIED_UNAUTHORIZED';
-
-        DemoStore.logAuditEvent({
-          actorId: activeDoctor.id,
-          actorName: activeDoctor.fullName,
-          actorRole: 'doctor',
-          action: actionType,
-          targetPatientId: record.patientId,
-          targetPatientName: record.patientName,
-          targetRecordId: record.id,
-          targetRecordTitle: record.title,
-          details: {
-            violation: data.message || 'Access Denied (403)',
-            grantId: data.grant?.id,
-          },
-          confirmedOnChain: true,
-        });
-
         setAccessResult({
           recordId: record.id,
           result: {
@@ -161,43 +166,62 @@ export default function DoctorPortal() {
                 : data.error === 'ACCESS_DENIED_EXPIRED'
                 ? 'EXPIRED_GRANT'
                 : 'NO_GRANT',
-            message: data.message || 'Access denied by server-side zero-trust authorization.',
+            message: data.message || 'Access denied by server-side zero-trust authorization gateway.',
           },
           record: undefined,
         });
       }
     } catch {
-      // Fallback to local verifier if server unreachable
-      const result = DemoStore.verifyAccess(activeDoctor.id, record.patientId);
+      // STRICT ZERO-TRUST REQUIREMENT: Never fallback to client-side grant verification!
+      // Medical files are NEVER accessible merely because client-side state claims access.
       setAccessResult({
         recordId: record.id,
-        result,
-        record: result.allowed ? record : undefined,
+        result: {
+          allowed: false,
+          reason: 'NO_GRANT',
+          message: 'Server authorization check failed or unreachable. Access strictly denied by zero-trust gate.',
+        },
+        record: undefined,
       });
     } finally {
       setEvaluatingRecordId(null);
     }
   };
 
-  const handleCreateRequest = (e: React.FormEvent) => {
+  const handleCreateRequest = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!requestPurpose.trim()) return;
 
-    DemoStore.createRequest({
-      doctorId: activeDoctor.id,
-      patientId: selectedPatient.id,
-      purpose: requestPurpose,
-      clinicalNotes: requestNotes,
-      requestedDurationHours: requestHours,
-    });
+    try {
+      const res = await fetch('/api/access-requests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          patientId: selectedPatient.id,
+          purpose: requestPurpose.trim(),
+          clinicalNotes: requestNotes.trim(),
+          requestedDurationHours: requestHours,
+        }),
+      });
 
-    setIsRequestModalOpen(false);
-    setRequestPurpose('');
-    setRequestNotes('');
-    setRequestStatusMsg(
-      `Access request sent to ${selectedPatient.fullName}. Switch to Patient Portal to approve.`
-    );
-    setTimeout(() => setRequestStatusMsg(null), 6000);
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || 'Failed to submit access request');
+      }
+
+      await fetchDoctorData(activeDoctor.id);
+      setIsRequestModalOpen(false);
+      setRequestPurpose('');
+      setRequestNotes('');
+      setRequestStatusMsg(
+        `Access request dispatched to ${selectedPatient.fullName}. Switch to Patient Portal to approve.`
+      );
+      setTimeout(() => setRequestStatusMsg(null), 6000);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Error submitting request';
+      setErrorMessage(msg);
+    }
   };
 
   if (!mounted) {
@@ -216,6 +240,27 @@ export default function DoctorPortal() {
           <button onClick={() => setRequestStatusMsg(null)}>
             <X className="h-4 w-4 text-blue-600" />
           </button>
+        </div>
+      )}
+
+      {/* Error Alert */}
+      {errorMessage && (
+        <div className="bg-rose-50 border border-rose-200 text-rose-800 px-4 py-3 rounded-xl flex items-center justify-between shadow-xs">
+          <div className="flex items-center space-x-2">
+            <X className="h-5 w-5 text-rose-600 shrink-0" />
+            <span className="text-sm font-semibold">{errorMessage}</span>
+          </div>
+          <button onClick={() => setErrorMessage(null)}>
+            <X className="h-4 w-4 text-rose-600" />
+          </button>
+        </div>
+      )}
+
+      {/* Loading Indicator */}
+      {isLoading && (
+        <div className="bg-blue-50 border border-blue-200 text-blue-800 px-4 py-2.5 rounded-xl text-xs flex items-center space-x-2">
+          <Clock className="h-4 w-4 text-blue-600 animate-spin" />
+          <span>Synchronizing patient records and zero-trust consent grants...</span>
         </div>
       )}
 

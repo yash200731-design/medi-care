@@ -19,8 +19,8 @@ import {
   X,
   Sparkles,
 } from 'lucide-react';
-import { DemoStore, computeSha256 } from '@/lib/store/demo-store';
-import { MedicalRecord, ConsentGrant, AccessRequest, RecordCategory } from '@/types';
+import { computeSha256 } from '@/lib/store/demo-store';
+import { MedicalRecord, ConsentGrant, AccessRequest, RecordCategory, UserProfile } from '@/types';
 import { DEMO_PATIENTS } from '@/lib/mock-data';
 
 export default function PatientDashboard() {
@@ -28,10 +28,18 @@ export default function PatientDashboard() {
   const [activeTab, setActiveTab] = useState<'records' | 'grants' | 'requests'>('records');
 
   // State
+  const [currentPatient, setCurrentPatient] = useState<UserProfile>(DEMO_PATIENTS[0]);
   const [records, setRecords] = useState<MedicalRecord[]>([]);
   const [grants, setGrants] = useState<ConsentGrant[]>([]);
   const [requests, setRequests] = useState<AccessRequest[]>([]);
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
+
+  // Status & Feedback State
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isActionLoading, setIsActionLoading] = useState<boolean>(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [actionSuccessMsg, setActionSuccessMsg] = useState<string | null>(null);
+  const [persistenceMode, setPersistenceMode] = useState<string>('');
 
   // Modals
   const [isUploadOpen, setIsUploadOpen] = useState(false);
@@ -46,33 +54,69 @@ export default function PatientDashboard() {
   const [newContent, setNewContent] = useState('');
   const [liveCalculatedSha, setLiveCalculatedSha] = useState('');
   const [isUploading, setIsUploading] = useState(false);
-  const [actionSuccessMsg, setActionSuccessMsg] = useState<string | null>(null);
 
-  const currentUser = DemoStore.getCurrentUser();
-  const currentPatient =
-    currentUser.role === 'patient'
-      ? currentUser
-      : DEMO_PATIENTS[0]; // Fallback to Sarah Chen
+  const refreshData = async () => {
+    setIsLoading(true);
+    setErrorMessage(null);
+    try {
+      const [recRes, grantRes, reqRes] = await Promise.all([
+        fetch('/api/records', { credentials: 'include' }),
+        fetch('/api/consent', { credentials: 'include' }),
+        fetch('/api/access-requests', { credentials: 'include' }),
+      ]);
 
-  const refreshData = () => {
-    const allRecords = DemoStore.getRecords().filter((r) => r.patientId === currentPatient.id);
-    const allGrants = DemoStore.getGrants().filter((g) => g.patientId === currentPatient.id);
-    const allRequests = DemoStore.getRequests().filter((r) => r.patientId === currentPatient.id);
+      if (!recRes.ok || !grantRes.ok || !reqRes.ok) {
+        throw new Error('Failed to retrieve patient vault records from backend gateway.');
+      }
 
-    setRecords(allRecords);
-    setGrants(allGrants);
-    setRequests(allRequests);
+      const recData = await recRes.json();
+      const grantData = await grantRes.json();
+      const reqData = await reqRes.json();
+
+      setRecords(recData.records || []);
+      setGrants(grantData.grants || []);
+      setRequests(reqData.requests || []);
+
+      if (recData.persistence?.label) {
+        setPersistenceMode(recData.persistence.label);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to synchronize with server';
+      setErrorMessage(msg);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   useEffect(() => {
     setMounted(true);
-    refreshData();
-    fetch('/api/auth/session', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: currentPatient.id }),
-    }).catch(() => {});
-  }, [currentPatient.id]);
+
+    // 1. Resolve current session
+    fetch('/api/auth/session')
+      .then((res) => (res.ok ? res.json() : null))
+      .then(async (sessionData) => {
+        if (sessionData && sessionData.authenticated && sessionData.user?.role === 'patient') {
+          setCurrentPatient(sessionData.user);
+          await refreshData();
+        } else {
+          // Initialize session for default patient
+          const initRes = await fetch('/api/auth/session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId: DEMO_PATIENTS[0].id }),
+          });
+          const initData = await initRes.json();
+          if (initData && initData.user) {
+            setCurrentPatient(initData.user);
+          }
+          await refreshData();
+        }
+      })
+      .catch((err) => {
+        setErrorMessage(err instanceof Error ? err.message : 'Authentication initialization error');
+        setIsLoading(false);
+      });
+  }, []);
 
   // Compute live hash as user types content
   useEffect(() => {
@@ -94,60 +138,107 @@ export default function PatientDashboard() {
     if (!newTitle.trim() || !newContent.trim()) return;
 
     setIsUploading(true);
+    setErrorMessage(null);
     try {
       const sha256 = await computeSha256(newContent);
 
-      const added = DemoStore.addRecord({
-        patientId: currentPatient.id,
-        patientName: currentPatient.fullName,
-        title: newTitle,
-        category: newCategory,
-        description: newDescription,
-        storagePath: `${currentPatient.id}/${Date.now()}-${newTitle.toLowerCase().replace(/\s+/g, '_')}.pdf`,
-        fileName: `${newTitle.replace(/\s+/g, '_')}.pdf`,
-        fileSize: new Blob([newContent]).size,
-        mimeType: 'application/pdf',
-        documentSha256: sha256,
-        contentPreview: newContent,
+      const res = await fetch('/api/records', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          title: newTitle.trim(),
+          category: newCategory,
+          description: newDescription.trim(),
+          fileName: `${newTitle.trim().replace(/\s+/g, '_')}.pdf`,
+          contentPreview: newContent,
+          documentSha256: sha256,
+        }),
       });
 
-      refreshData();
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || 'Medical record upload rejected by server.');
+      }
+
+      await refreshData();
       setIsUploadOpen(false);
       setNewTitle('');
       setNewDescription('');
       setNewContent('');
       setLiveCalculatedSha('');
 
-      setActionSuccessMsg(`Record "${added.title}" uploaded! SHA-256 anchored to blockchain ledger.`);
+      setActionSuccessMsg(`Record "${data.record?.title || newTitle}" successfully signed & anchored to ledger.`);
       setTimeout(() => setActionSuccessMsg(null), 5000);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Error uploading medical document';
+      setErrorMessage(msg);
     } finally {
       setIsUploading(false);
     }
   };
 
-  const handleRevoke = (grantId: string) => {
-    if (confirm('Immediately revoke access for this physician? All subsequent protected requests will be denied with HTTP 403.')) {
-      DemoStore.revokeConsent(grantId);
-      refreshData();
-      setActionSuccessMsg('Access grant revoked immediately on blockchain ledger.');
+  const handleRevoke = async (grantId: string) => {
+    if (!confirm('Immediately revoke access for this physician? All subsequent protected requests will be denied with HTTP 403.')) {
+      return;
+    }
+
+    setIsActionLoading(true);
+    setErrorMessage(null);
+    try {
+      const res = await fetch(`/api/consent?grantId=${encodeURIComponent(grantId)}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || 'Server rejected consent revocation.');
+      }
+
+      await refreshData();
+      setActionSuccessMsg('Access grant IMMEDIATELY revoked on ledger. Doctor access is permanently terminated.');
       setTimeout(() => setActionSuccessMsg(null), 5000);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Revocation error';
+      setErrorMessage(msg);
+    } finally {
+      setIsActionLoading(false);
     }
   };
 
-  const handleApprove = () => {
+  const handleApprove = async () => {
     if (!approveRequestTarget) return;
 
-    DemoStore.grantConsent({
-      requestId: approveRequestTarget.id,
-      patientId: currentPatient.id,
-      doctorId: approveRequestTarget.doctorId,
-      durationHours: grantDuration,
-    });
+    setIsActionLoading(true);
+    setErrorMessage(null);
+    try {
+      const res = await fetch('/api/consent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          requestId: approveRequestTarget.id,
+          doctorId: approveRequestTarget.doctorId,
+          durationHours: grantDuration,
+        }),
+      });
 
-    refreshData();
-    setApproveRequestTarget(null);
-    setActionSuccessMsg(`Consent granted for ${grantDuration} hours. Anchored on-chain.`);
-    setTimeout(() => setActionSuccessMsg(null), 5000);
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || 'Server rejected consent grant.');
+      }
+
+      await refreshData();
+      setApproveRequestTarget(null);
+      setActionSuccessMsg(`Consent granted for ${grantDuration} hours. Anchored on-chain.`);
+      setTimeout(() => setActionSuccessMsg(null), 5000);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Error issuing consent grant';
+      setErrorMessage(msg);
+    } finally {
+      setIsActionLoading(false);
+    }
   };
 
   if (!mounted) {
@@ -175,12 +266,40 @@ export default function PatientDashboard() {
         </div>
       )}
 
+      {/* Error Alert */}
+      {errorMessage && (
+        <div className="bg-rose-50 border border-rose-200 text-rose-800 px-4 py-3 rounded-xl flex items-center justify-between shadow-xs">
+          <div className="flex items-center space-x-2">
+            <X className="h-5 w-5 text-rose-600 shrink-0" />
+            <span className="text-sm font-semibold">{errorMessage}</span>
+          </div>
+          <button onClick={() => setErrorMessage(null)}>
+            <X className="h-4 w-4 text-rose-600" />
+          </button>
+        </div>
+      )}
+
+      {/* Loading Indicator */}
+      {isLoading && (
+        <div className="bg-blue-50 border border-blue-200 text-blue-800 px-4 py-2.5 rounded-xl text-xs flex items-center space-x-2">
+          <Clock className="h-4 w-4 text-blue-600 animate-spin" />
+          <span>Synchronizing with server-side EHR vault and blockchain ledger...</span>
+        </div>
+      )}
+
       {/* Header Profile Banner */}
       <div className="bg-gradient-to-r from-blue-900 via-blue-800 to-teal-800 rounded-3xl p-6 sm:p-8 text-white shadow-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
         <div className="space-y-2">
-          <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-blue-500/20 text-blue-200 text-xs font-semibold border border-blue-400/30">
-            <ShieldCheck className="h-3.5 w-3.5" />
-            <span>Sovereign Patient EHR Vault</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-blue-500/20 text-blue-200 text-xs font-semibold border border-blue-400/30">
+              <ShieldCheck className="h-3.5 w-3.5" />
+              <span>Sovereign Patient EHR Vault</span>
+            </div>
+            {persistenceMode && (
+              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full bg-amber-400/20 text-amber-200 text-[11px] font-mono border border-amber-400/30">
+                {persistenceMode}
+              </span>
+            )}
           </div>
           <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
             Welcome, {currentPatient.fullName}

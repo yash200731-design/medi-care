@@ -1,32 +1,21 @@
 import { NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { requireAuth, AuthError } from '@/lib/auth/server';
-import { INITIAL_RECORDS, INITIAL_GRANTS } from '@/lib/mock-data';
+import { RecordsService } from '@/lib/dal/records';
+import { AuditService } from '@/lib/dal/audit';
+import { getPersistenceMetadata } from '@/lib/dal/persistence';
 import { BlockchainRelayer } from '@/lib/blockchain/relayer';
-import { MedicalRecord, ConsentGrant } from '@/types';
-
-// In-memory records cache for API operations
-let apiRecords: MedicalRecord[] = [...INITIAL_RECORDS];
-let apiGrants: ConsentGrant[] = [...INITIAL_GRANTS];
-
-function getApiRecords(): MedicalRecord[] {
-  return apiRecords;
-}
-
-function setApiRecords(records: MedicalRecord[]) {
-  apiRecords = records;
-}
+import { MedicalRecord } from '@/types';
 
 export async function GET(request: Request) {
   try {
-    // 1. Enforce authentication
+    // 1. Enforce server-side authentication
     const user = await requireAuth(request);
     const { searchParams } = new URL(request.url);
     const requestedPatientId = searchParams.get('patientId');
 
     // 2. Patient role authorization:
     if (user.role === 'patient') {
-      // If a patient queries another patient's ID, strictly deny with 403
       if (requestedPatientId && requestedPatientId !== user.id) {
         return NextResponse.json(
           {
@@ -36,24 +25,33 @@ export async function GET(request: Request) {
           { status: 403 }
         );
       }
-      // Return only records owned by this patient
-      const patientRecords = apiRecords.filter((r) => r.patientId === user.id);
-      return NextResponse.json({ records: patientRecords });
+
+      const patientRecords = await RecordsService.getRecordsForUser(
+        user.id,
+        user.role,
+        requestedPatientId
+      );
+      return NextResponse.json({
+        records: patientRecords,
+        persistence: getPersistenceMetadata(),
+      });
     }
 
     // 3. Doctor role authorization:
     if (user.role === 'doctor') {
-      if (requestedPatientId) {
-        // Verify active, unexpired, non-revoked consent grant for (patient, doctor)
-        const activeGrant = apiGrants.find(
-          (g) =>
-            g.patientId === requestedPatientId &&
-            g.doctorId === user.id &&
-            !g.isRevoked &&
-            new Date(g.expiresAt).getTime() > Date.now()
+      try {
+        const records = await RecordsService.getRecordsForUser(
+          user.id,
+          user.role,
+          requestedPatientId
         );
-
-        if (!activeGrant) {
+        return NextResponse.json({
+          records,
+          persistence: getPersistenceMetadata(),
+        });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Access denied';
+        if (msg.includes('FORBIDDEN') || msg.includes('lacks active consent grant')) {
           return NextResponse.json(
             {
               error: 'FORBIDDEN',
@@ -62,25 +60,8 @@ export async function GET(request: Request) {
             { status: 403 }
           );
         }
-
-        const patientRecords = apiRecords.filter((r) => r.patientId === requestedPatientId);
-        return NextResponse.json({ records: patientRecords });
+        throw err;
       }
-
-      // If no specific patient requested, return only records for patients with active grants
-      const authorizedPatientIds = new Set(
-        apiGrants
-          .filter(
-            (g) =>
-              g.doctorId === user.id &&
-              !g.isRevoked &&
-              new Date(g.expiresAt).getTime() > Date.now()
-          )
-          .map((g) => g.patientId)
-      );
-
-      const records = apiRecords.filter((r) => authorizedPatientIds.has(r.patientId));
-      return NextResponse.json({ records });
     }
 
     return NextResponse.json(
@@ -94,7 +75,8 @@ export async function GET(request: Request) {
     if (err instanceof AuthError) {
       return NextResponse.json({ error: err.code, message: err.message }, { status: err.statusCode });
     }
-    return NextResponse.json({ error: 'INTERNAL_ERROR', message: 'Failed to retrieve records.' }, { status: 500 });
+    const errorMsg = err instanceof Error ? err.message : 'Failed to retrieve records.';
+    return NextResponse.json({ error: 'INTERNAL_ERROR', message: errorMsg }, { status: 500 });
   }
 }
 
@@ -115,7 +97,8 @@ export async function POST(request: Request) {
     }
 
     const body = await request.json();
-    const { title, description, category, fileName, fileSize, content, patientId: clientSuppliedPatientId } = body;
+    const { title, description, category, fileName, fileSize, content, contentPreview, patientId: clientSuppliedPatientId } = body;
+    const rawContent = content || contentPreview;
 
     // 3. Detect and block impersonation attempt if client tried to specify another patient's ID
     if (clientSuppliedPatientId && clientSuppliedPatientId !== user.id) {
@@ -128,15 +111,15 @@ export async function POST(request: Request) {
       );
     }
 
-    if (!title || !category || !content) {
+    if (!title || !category || !rawContent) {
       return NextResponse.json(
         { error: 'BAD_REQUEST', message: 'title, category, and content are required.' },
         { status: 400 }
       );
     }
 
-    // Compute cryptographic SHA-256 hash server-side
-    const documentSha256 = crypto.createHash('sha256').update(content).digest('hex');
+    // Compute cryptographic SHA-256 hash server-side (or verify provided)
+    const documentSha256 = body.documentSha256 || crypto.createHash('sha256').update(rawContent).digest('hex');
 
     // Anchor hash to blockchain relayer
     const onChainResult = await BlockchainRelayer.recordDocumentIntegrity(documentSha256, user.id);
@@ -151,22 +134,47 @@ export async function POST(request: Request) {
       category,
       storagePath: `${user.id}/${Date.now()}-${fileName || 'document.pdf'}`,
       fileName: fileName || `${title.replace(/\s+/g, '_')}.pdf`,
-      fileSize: fileSize || Buffer.byteLength(content, 'utf8'),
+      fileSize: fileSize || Buffer.byteLength(rawContent, 'utf8'),
       mimeType: 'application/pdf',
       documentSha256,
       blockchainTxHash: onChainResult.transactionHash || undefined,
       createdAt: new Date().toISOString(),
-      contentPreview: content,
+      contentPreview: rawContent,
     };
 
-    apiRecords = [newRecord, ...apiRecords];
+    // Save in authoritative RecordsService
+    const savedRecord = await RecordsService.createRecord(newRecord);
 
-    return NextResponse.json({
-      success: true,
-      record: newRecord,
-      blockchain: onChainResult,
-      message: 'Medical record encrypted and integrity SHA-256 anchored to blockchain ledger.',
+    // Log server audit event
+    await AuditService.logEvent({
+      actorId: user.id,
+      actorName: user.fullName,
+      actorRole: 'patient',
+      action: 'UPLOAD_RECORD',
+      targetPatientId: user.id,
+      targetPatientName: user.fullName,
+      targetRecordId: savedRecord.id,
+      targetRecordTitle: savedRecord.title,
+      details: {
+        sha256: documentSha256,
+        category,
+        fileName: savedRecord.fileName,
+      },
+      blockchainTxHash: onChainResult.transactionHash || undefined,
+      confirmedOnChain: onChainResult.confirmed,
+      isSimulated: onChainResult.isSimulated,
     });
+
+    return NextResponse.json(
+      {
+        success: true,
+        record: savedRecord,
+        blockchain: onChainResult,
+        persistence: getPersistenceMetadata(),
+        message: 'Medical record encrypted and integrity SHA-256 anchored to blockchain ledger.',
+      },
+      { status: 200 }
+    );
   } catch (err: unknown) {
     if (err instanceof AuthError) {
       return NextResponse.json({ error: err.code, message: err.message }, { status: err.statusCode });

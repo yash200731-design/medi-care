@@ -20,6 +20,9 @@ async function runPhase1Tests() {
   console.log('MediVault Phase 1: Authentication & API Protection Verification');
   console.log('=================================================================\n');
 
+  // Clean test isolation: reset demo store to initial state
+  await fetch(`${BASE_URL}/api/auth/session`, { method: 'DELETE' }).catch(() => {});
+
   let passed = 0;
   let total = 0;
 
